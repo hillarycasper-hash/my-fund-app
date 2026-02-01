@@ -19,54 +19,69 @@ st.markdown("""
     .market-scroll { display: flex; gap: 8px; overflow-x: auto; padding: 5px 2px; scrollbar-width: none; margin-bottom: 10px; }
     .market-card-small { background: white; border: 1px solid #eee; border-radius: 6px; min-width: 80px; text-align: center; padding: 8px 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
     
-    /* 核心卡片 */
+    /* 核心资产卡片 */
     .hero-box { background: linear-gradient(135deg, #2c3e50 0%, #000000 100%); color: white; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
     
     /* 基金列表容器 */
     .fund-container { background: white; border-radius: 8px; padding: 12px; border: 1px solid #e0e0e0; margin-bottom: 5px; }
 
-    /* ============ 核心修复：强制手机端一行显示 ============ */
+    /* ============ 核心修复：强制单行不滚动 ============ */
     
-    /* 1. 强制水平布局不换行 (针对 st.columns) */
+    /* 1. 强制两列在手机上绝对不堆叠，保持水平排列 */
     div[data-testid="stHorizontalBlock"] {
-        flex-wrap: nowrap !important; /* 核心：禁止手机端自动堆叠 */
-        align-items: center !important; /* 垂直居中 */
+        flex-wrap: nowrap !important;
+        align-items: center !important;
     }
     
-    /* 2. 定制删除按钮：极简文字版，省空间 */
-    div[data-testid="column"] button {
-        border: none !important;
-        background: transparent !important;
-        color: #999 !important;
-        padding: 0px !important;
-        font-size: 13px !important;
-        height: auto !important;
-        min-height: 0px !important;
-        line-height: 1 !important;
-        float: right; 
-        margin-top: 2px;
-    }
-    div[data-testid="column"] button:hover {
-        color: #ff4b4b !important;
+    /* 2. 左侧文字列：如果文字太长，显示省略号，而不是撑开屏幕 */
+    div[data-testid="column"]:nth-of-type(1) {
+        min-width: 0 !important; /* 关键：允许Flex子元素缩小 */
+        overflow: hidden !important;
     }
     
-    /* 3. 基金名称样式：防止文字过长把按钮挤飞 */
-    .fund-name-wrapper {
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis; /* 文字太长显示省略号 */
+    /* 3. 基金名字样式：配合上面的截断 */
+    .fund-name-row {
+        white-space: nowrap;       /* 强制不换行 */
+        overflow: hidden;          /* 超出隐藏 */
+        text-overflow: ellipsis;   /* 超出显示... */
+        font-size: 15px;
         font-weight: bold;
         color: #333;
-        font-size: 14px;
-        line-height: 1.5;
+        line-height: 36px; /* 垂直居中，与按钮高度对齐 */
     }
-    .fund-code-wrapper {
-        font-size: 12px;
-        color: #ccc;
+    .fund-code-tiny {
+        font-size: 12px; 
+        color: #999; 
+        font-weight: normal; 
         margin-left: 4px;
     }
 
-    /* 其他通用颜色 */
+    /* 4. 右侧按钮列：固定宽度，紧凑 */
+    div[data-testid="column"]:nth-of-type(2) {
+        flex: 0 0 auto !important; /* 不许伸缩 */
+        width: auto !important;
+        padding-left: 0px !important;
+    }
+
+    /* 5. 极简垃圾桶按钮 */
+    div[data-testid="column"] button {
+        border: none !important;
+        background: transparent !important;
+        color: #ccc !important;   /* 默认浅灰，不抢眼 */
+        padding: 0px !important;
+        font-size: 16px !important; /* 图标大小 */
+        height: 36px !important;    /* 高度与文字行高一致 */
+        line-height: 36px !important;
+        margin: 0 !important;
+        width: 100%;
+        text-align: right;          /* 靠右对齐 */
+    }
+    div[data-testid="column"] button:hover {
+        color: #ff4b4b !important; /* 悬停变红 */
+        background: transparent !important;
+    }
+
+    /* 通用涨跌色 */
     .t-red { color: #e74c3c; font-weight: bold; }
     .t-green { color: #2ecc71; font-weight: bold; }
     .t-gray { color: #999; font-size: 12px; }
@@ -75,12 +90,12 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 2. 数据库逻辑 =================
-conn = sqlite3.connect('zzl_v34_mobile.db', check_same_thread=False)
+# ================= 2. 数据库逻辑 (保持) =================
+conn = sqlite3.connect('zzl_v36_oneline.db', check_same_thread=False)
 conn.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, portfolio TEXT)')
 current_user = 'admin'
 
-# ================= 3. 数据获取逻辑 (保持不变) =================
+# ================= 3. 数据获取逻辑 (保持) =================
 @st.cache_data(ttl=30, show_spinner=False)
 def get_indices():
     codes = [('gb_ixic', '纳斯达克', 1, 26), ('rt_hkHSI', '恒生指数', 6, 3), ('sh000001', '上证指数', 3, 2), ('fx_susdcnh', '离岸汇率', 8, 3)]
@@ -241,20 +256,22 @@ if not final_list:
     st.info("请在左侧添加基金")
 
 for item in final_list:
-    # 【改动】使用 [8, 2] 比例，配合 flex-wrap: nowrap 强制不换行
-    c1, c2 = st.columns([0.8, 0.2], gap="small")
+    # --- 核心布局：名字+按钮在同一行，不滚动 ---
     
-    with c1:
-        # 使用 div 包装，防止文字太长撑开布局
+    # 比例 85% : 15% 
+    # CSS 已确保 .fund-name-row 会自动截断过长文字，不会挤开按钮
+    c_name, c_btn = st.columns([0.85, 0.15])
+    
+    with c_name:
         st.markdown(f"""
-        <div class="fund-name-wrapper">
-            {item['name']} <span class="fund-code-wrapper">{item['c']}</span>
+        <div class="fund-name-row">
+            {item['name']}<span class="fund-code-tiny">{item['c']}</span>
         </div>
         """, unsafe_allow_html=True)
         
-    with c2:
-        # 极简文字按钮，无边框
-        if st.button("删除", key=f"del_{item['c']}"):
+    with c_btn:
+        # 使用图标 🗑 代表删除，非常省空间
+        if st.button("🗑", key=f"del_{item['c']}"):
             new_p = [x for x in st.session_state.portfolio if x['c'] != item['c']]
             st.session_state.portfolio = new_p
             conn.execute('UPDATE users SET portfolio=? WHERE username=?', (json.dumps(new_p), current_user))
