@@ -7,18 +7,37 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 from streamlit_autorefresh import st_autorefresh
 
-# ================= 1. 基础配置 (UI完全保持不变) =================
+# ================= 1. 基础配置 =================
 st.set_page_config(page_title="涨涨乐Pro", page_icon="📈", layout="centered")
 st_autorefresh(interval=60 * 1000, key="global_refresh")
 
 st.markdown("""
 <style>
     .stApp { background-color: #f5f7f9; }
+    /* 顶部行情 */
     .market-scroll { display: flex; gap: 8px; overflow-x: auto; padding: 5px 2px; scrollbar-width: none; margin-bottom: 10px; }
     .market-card-small { background: white; border: 1px solid #eee; border-radius: 6px; min-width: 80px; text-align: center; padding: 8px 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+    /* 核心卡片 */
     .hero-box { background: linear-gradient(135deg, #2c3e50 0%, #000000 100%); color: white; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+    /* 基金列表容器 */
     .fund-container { background: white; border-radius: 8px; padding: 12px; border: 1px solid #e0e0e0; margin-bottom: 5px; }
-    div[data-testid="column"] button { padding: 0px 8px !important; min-height: 0px !important; height: 30px !important; line-height: 1 !important; border: 1px solid #f0f0f0; }
+    
+    /* 【按钮微调】让“删除”按钮高度居中，去掉多余留白 */
+    div[data-testid="column"] button { 
+        padding: 0px 0px !important; 
+        min-height: 0px !important; 
+        height: 32px !important; 
+        line-height: 30px !important; 
+        border: 1px solid #f0f0f0;
+        font-size: 13px !important;
+        color: #666 !important;
+    }
+    div[data-testid="column"] button:hover {
+        border-color: #ff4b4b !important;
+        color: #ff4b4b !important;
+        background-color: #fff0f0 !important;
+    }
+    
     .t-red { color: #e74c3c; font-weight: bold; }
     .t-green { color: #2ecc71; font-weight: bold; }
     .t-gray { color: #999; font-size: 12px; }
@@ -28,11 +47,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ================= 2. 数据库 =================
-conn = sqlite3.connect('zzl_v31_final.db', check_same_thread=False)
+conn = sqlite3.connect('zzl_v32_del.db', check_same_thread=False)
 conn.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, portfolio TEXT)')
 current_user = 'admin'
 
-# ================= 3. 数据获取逻辑 (核心修复在 get_fund_stocks) =================
+# ================= 3. 数据获取逻辑 (V31 核心逻辑保持不变) =================
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_indices():
@@ -105,11 +124,9 @@ def get_details(code):
     except:
         return None
 
-# 【核心升级】三级火箭式抓取：API -> 主代码API -> 网页强抓
 @st.cache_data(ttl=300, show_spinner=False)
 def get_fund_stocks(fund_code):
-    
-    # 辅助函数：根据代码尝试 API
+    """三级火箭式抓取"""
     def fetch_api(target):
         stocks = []
         try:
@@ -125,41 +142,33 @@ def get_fund_stocks(fund_code):
             pass
         return stocks
 
-    # 辅助函数：【终极杀招】直接抓网页 HTML
     def fetch_html_fallback(target):
         stocks = []
         try:
-            # 这个接口返回的是包含HTML的JS变量，专门用于网页展示，数据最全
             url = f"https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code={target}&topline=10"
             r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
-            # 提取 content:"..." 中的 HTML
             match = re.search(r'content:"(.*?)",', r.text)
             if match:
                 html_content = match.group(1).replace(r'\"', '"')
                 soup = BeautifulSoup(html_content, 'html.parser')
-                # 解析表格
                 rows = soup.find_all('tr')
                 for row in rows:
                     tds = row.find_all('td')
                     if len(tds) >= 2:
-                        # 只有包含股票代码的行才是有效的
                         code_txt = tds[1].text.strip()
                         name_txt = tds[2].text.strip()
-                        if re.match(r'^\d+$', code_txt): # 确保是数字代码
+                        if re.match(r'^\d+$', code_txt):
                             prefix = "sh" if code_txt.startswith('6') else ("bj" if code_txt.startswith(('4','8')) else "sz")
                             stocks.append({"c": f"{prefix}{code_txt}", "n": name_txt})
         except:
             pass
         return stocks[:10]
 
-    # --- 第一级：尝试直接 API ---
     stock_list = fetch_api(fund_code)
     
-    # --- 第二级：尝试主代码 (针对 C 类) ---
     if not stock_list:
         master_code = fund_code
         try:
-            # 获取主代码
             r_map = requests.get(f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js", timeout=1.5)
             match = re.search(r'fS_code\s*=\s*"(.*?)"', r_map.text)
             if match:
@@ -170,17 +179,13 @@ def get_fund_stocks(fund_code):
         if master_code != fund_code:
             stock_list = fetch_api(master_code)
             
-        # --- 第三级：如果 API 还是空，启动网页强抓 (针对顽固 C 类) ---
         if not stock_list:
-            # 优先抓主代码的网页，如果没有主代码抓自己的
             target_for_html = master_code if master_code else fund_code
             stock_list = fetch_html_fallback(target_for_html)
 
-    # 如果三次努力都失败，那就真没办法了
     if not stock_list:
         return []
 
-    # --- 批量查询行情 (保持原样) ---
     try:
         sina_codes = [x['c'] for x in stock_list]
         url_hq = f"http://hq.sinajs.cn/list={','.join(sina_codes)}"
@@ -205,7 +210,7 @@ def get_fund_stocks(fund_code):
     except:
         return []
 
-# ================= 4. 页面渲染 (完全保持原样) =================
+# ================= 4. 页面渲染 =================
 
 st.markdown("##### 🌍 全球行情")
 idx_data = get_indices()
@@ -249,11 +254,13 @@ if not final_list:
     st.info("请在左侧添加基金")
 
 for item in final_list:
-    c1, c2 = st.columns([0.85, 0.15])
+    # 【改动】列宽调整，右侧给0.18，保证“删除”两个字不拥挤
+    c1, c2 = st.columns([0.82, 0.18])
     with c1:
         st.markdown(f"**{item['name']}** <span style='color:#ccc; font-size:12px'>{item['c']}</span>", unsafe_allow_html=True)
     with c2:
-        if st.button("🗑", key=f"del_{item['c']}"):
+        # 【改动】图标换成文字“删除”
+        if st.button("删除", key=f"del_{item['c']}"):
             new_p = [x for x in st.session_state.portfolio if x['c'] != item['c']]
             st.session_state.portfolio = new_p
             conn.execute('UPDATE users SET portfolio=? WHERE username=?', (json.dumps(new_p), current_user))
