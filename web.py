@@ -6,13 +6,12 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from streamlit_autorefresh import st_autorefresh
 
-# ================= 🎨 极致紧凑 UI 注入 =================
-st.set_page_config(page_title="涨涨乐资产管家", page_icon="📈", layout="wide")
+# ================= 🎨 交互升级 UI 注入 =================
+st.set_page_config(page_title="涨涨乐 Pro", page_icon="📈", layout="wide")
 
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;700;900&display=swap');
-    
     html, body, [class*="css"] { font-family: 'Noto Sans SC', sans-serif !important; }
     .main { background-color: #f2f2f7; padding: 10px !important; }
     
@@ -27,39 +26,60 @@ st.markdown("""
         text-align: center;
     }
     
-    /* 资产磁贴：拒绝虚化，保持清晰 */
+    /* 资产磁贴 */
     .fund-card {
         background: white;
-        padding: 20px;
-        border-radius: 20px;
+        padding: 18px;
+        border-radius: 22px;
         margin-bottom: 15px;
         border: 1px solid #e5e5ea;
     }
-    
-    .val-box { text-align: left; flex: 1; }
-    .label-tag { font-size: 11px; color: #8e8e93; font-weight: 700; margin-bottom: 4px; }
-    .num-main { font-size: 24px; font-weight: 900; letter-spacing: -0.5px; line-height: 1; }
-    .num-sub { font-size: 12px; margin-top: 5px; font-weight: 600; }
-    
-    /* 紧凑按钮 */
-    .stButton>button { 
-        width: 100%; border-radius: 10px; height: 32px; font-size: 12px; 
-        background: #f2f2f7; border: none; color: #8e8e93; 
+
+    /* 标题栏容器：实现名字和按钮在一行 */
+    .card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 15px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid #f2f2f7;
     }
-    
-    /* 初始界面：功能介绍区 */
-    .intro-grid {
-        display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px;
+
+    .fund-name {
+        font-size: 15px;
+        font-weight: 700;
+        color: #1c1c1e;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 80%;
     }
-    .intro-item {
-        background: white; padding: 15px; border-radius: 15px; text-align: center; font-size: 12px;
+
+    /* 左右对齐的数据盒子 */
+    .flex-container { display: flex; justify-content: space-between; }
+    .val-box { flex: 1; }
+    .label-tag { font-size: 10px; color: #8e8e93; font-weight: 700; margin-bottom: 4px; text-transform: uppercase; }
+    .num-main { font-size: 24px; font-weight: 900; letter-spacing: -0.5px; }
+    .num-sub { font-size: 12px; margin-top: 2px; font-weight: 600; }
+
+    /* 紧凑型删除按钮样式覆盖 */
+    .stButton > button {
+        border: none !important;
+        background-color: transparent !important;
+        color: #c7c7cc !important;
+        padding: 0 !important;
+        width: 30px !important;
+        height: 30px !important;
+        font-size: 18px !important;
+        line-height: 1 !important;
     }
+    .stButton > button:hover { color: #ff3b30 !important; background: #fff5f5 !important; border-radius: 50%; }
     </style>
     """, unsafe_allow_html=True)
 
 st_autorefresh(interval=60 * 1000, key="auto_refresh")
 
-# ================= 🔧 核心逻辑 (100% 保持 0.92/0.99 系数) =================
+# ================= 🔧 核心逻辑 (0.92/0.99 系数 100% 保持) =================
 
 def get_sina_stock_price(code):
     prefix = "sh" if code.startswith(('6', '5', '11')) else "sz" if code.startswith(('0', '3', '1', '15')) else "rt_hk" if len(code)==5 else ""
@@ -69,7 +89,6 @@ def get_sina_stock_price(code):
         res = requests.get(url, headers={'Referer': 'https://finance.sina.com.cn'}, timeout=1)
         vals = res.text.split('="')[1].strip('";').split(',')
         curr, last = (float(vals[6]), float(vals[3])) if "hk" in prefix else (float(vals[3]), float(vals[2]))
-        # 提取股票接口里的日期
         t_date = vals[-4] if "hk" not in prefix else vals[-2]
         return ((curr - last) / last) * 100 if last > 0 else 0.0, t_date
     except: return 0.0, ""
@@ -91,7 +110,6 @@ def get_holdings_data(fund_code):
     return holdings
 
 def calculate_realtime(fund_code, fund_name):
-    # 【系数逻辑】保留：指数类0.99，主动类0.92
     factor = 0.99 if any(x in fund_name for x in ["指数", "ETF", "联接", "互联网", "纳斯达克"]) else 0.92
     holdings = get_holdings_data(fund_code)
     if not holdings: return 0.0, ""
@@ -114,82 +132,74 @@ def get_base_info(code):
     except: pass
     return name, nav, date
 
-# ================= 💾 资产列表处理 =================
+# ================= 💾 数据状态 =================
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = []
 
 with st.sidebar:
     st.markdown("### 📥 录入资产")
     with st.form("add_fund", clear_on_submit=True):
-        f_code = st.text_input("基金代码", placeholder="例如: 013279")
-        f_money = st.number_input("持有本金", value=10000.0, step=1000.0)
-        if st.form_submit_button("确认存入资产库", use_container_width=True):
+        f_code = st.text_input("基金代码", placeholder="013279")
+        f_money = st.number_input("持有本金", value=10000.0)
+        if st.form_submit_button("存入库", use_container_width=True):
             if f_code: st.session_state.portfolio.append({"code": f_code, "money": f_money}); st.rerun()
-    st.markdown("---")
-    if st.button("🗑️ 清空所有数据"): st.session_state.portfolio = []; st.rerun()
 
 # ================= 📊 主显示区 =================
 if st.session_state.portfolio:
-    with st.spinner('正在同步全球行情...'):
-        total_m = sum(i['money'] for i in st.session_state.portfolio)
-        is_weekend = datetime.now().weekday() >= 5
-        mixed_total_profit = 0.0
-        details = []
-
-        for i in st.session_state.portfolio:
-            name, last_r, last_d = get_base_info(i['code'])
-            real_r, stock_d = calculate_realtime(i['code'], name)
+    total_m = sum(i['money'] for i in st.session_state.portfolio)
+    is_weekend = datetime.now().weekday() >= 5
+    mixed_total_profit = 0.0
+    
+    # 顶部 Hero
+    hero_container = st.empty()
+    
+    st.markdown("### 💠 实时详情对比")
+    
+    for idx, i in enumerate(st.session_state.portfolio):
+        name, last_r, last_d = get_base_info(i['code'])
+        real_r, stock_d = calculate_realtime(i['code'], name)
+        
+        # 结算逻辑
+        eff_r = last_r if is_weekend else (last_r if last_d == datetime.now().strftime('%Y-%m-%d') else real_r)
+        mixed_total_profit += i['money'] * (eff_r / 100)
+        
+        # --- 🚀 核心改变：标题与删除按钮并排 ---
+        with st.container():
+            # 使用 columns 实现标题和删除按钮的紧凑对齐
+            col_title, col_del = st.columns([0.9, 0.1])
+            with col_title:
+                st.markdown(f'<div class="fund-name">{name}</div>', unsafe_allow_html=True)
+            with col_del:
+                if st.button("✕", key=f"del_{idx}"):
+                    st.session_state.portfolio.pop(idx)
+                    st.rerun()
             
-            # 【逻辑锁定】：周末总盈亏锁定为周五最终值
-            effective_r = last_r if is_weekend else (last_r if last_d == datetime.now().strftime('%Y-%m-%d') else real_r)
-            mixed_total_profit += i['money'] * (effective_r / 100)
-            details.append({"name": name, "money": i['money'], "real": real_r, "last": last_r, "l_date": last_d, "s_date": stock_d})
-
-    # 1. 顶部总览
-    status_label = "休市结算已锁定" if is_weekend else "交易实时追踪中"
-    st.markdown(f"""
-        <div class="hero-card">
-            <div style="font-size: 12px; opacity: 0.6; letter-spacing: 2px; margin-bottom: 10px;">{status_label}</div>
-            <div style="font-size: 50px; font-weight: 900; margin: 5px 0;">¥ {mixed_total_profit:+.2f}</div>
-            <div style="font-size: 14px; opacity: 0.8;">持仓总本金: ¥ {total_m:,.0f} &nbsp; | &nbsp; 预估总收益率: {(mixed_total_profit/total_m*100):+.2f}%</div>
-        </div>
-    """, unsafe_allow_html=True)
-
-    # 2. 持仓列表
-    st.markdown("### 💠 实时监控详情")
-    for idx, d in enumerate(details):
-        st.markdown(f"""
-            <div class="fund-card">
-                <div style="font-size: 16px; font-weight: 700; color: #1c1c1e; margin-bottom: 15px; border-bottom: 1px solid #f2f2f7; padding-bottom: 10px;">{d['name']}</div>
-                <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                    <div class="val-box">
-                        <div class="label-tag">实时估值 [{d['s_date'] or '休市'}]</div>
-                        <div class="num-main" style="color: {'#ff3b30' if d['real']>0 else '#34c759'};">{d['real']:+.2f}%</div>
-                        <div class="num-sub" style="color: {'#ff3b30' if d['real']>0 else '#34c759'};">¥ {d['money']*d['real']/100:+.2f}</div>
-                    </div>
-                    <div class="val-box" style="border-left: 1px solid #f2f2f7; padding-left: 20px;">
-                        <div class="label-tag">官方最终值 [{d['l_date']}]</div>
-                        <div class="num-main" style="color: {'#ff3b30' if d['last']>0 else '#34c759'};">{d['last']:+.2f}%</div>
-                        <div class="num-sub" style="color: {'#ff3b30' if d['last']>0 else '#34c759'};">¥ {d['money']*d['last']/100:+.2f}</div>
+            # 数据对比区
+            st.markdown(f"""
+                <div class="fund-card" style="margin-top: -20px;">
+                    <div class="flex-container">
+                        <div class="val-box">
+                            <div class="label-tag">实时估值 [{stock_d or '休市'}]</div>
+                            <div class="num-main" style="color: {'#ff3b30' if real_r>0 else '#34c759'};">{real_r:+.2f}%</div>
+                            <div class="num-sub" style="color: {'#ff3b30' if real_r>0 else '#34c759'};">¥ {i['money']*real_r/100:+.2f}</div>
+                        </div>
+                        <div class="val-box" style="border-left: 1px solid #f2f2f7; padding-left: 15px;">
+                            <div class="label-tag">官方最终值 [{last_d}]</div>
+                            <div class="num-main" style="color: {'#ff3b30' if last_r>0 else '#34c759'};">{last_r:+.2f}%</div>
+                            <div class="num-sub" style="color: {'#ff3b30' if last_r>0 else '#34c759'};">¥ {i['money']*last_r/100:+.2f}</div>
+                        </div>
                     </div>
                 </div>
-            </div>
-        """, unsafe_allow_html=True)
-        if st.button(f"移除 {d['name'][:6]}", key=f"del_{idx}"):
-            st.session_state.portfolio.pop(idx); st.rerun()
+            """, unsafe_allow_html=True)
 
-else:
-    # 3. 初始进入画面：更紧凑、更有指引感
-    st.markdown("""
-        <div class="hero-card" style="background: white; color: #1c1c1e; border: 1px solid #e5e5ea;">
-            <h1 style="font-size: 32px; font-weight: 900; margin-bottom: 10px;">待录入资产</h1>
-            <p style="color: #8e8e93; font-size: 14px;">请在侧边栏添加基金代码，开始享受硅谷级数据监控</p>
-        </div>
-        <div class="intro-grid">
-            <div class="intro-item"><b>🎯 实时拟合</b><br>基于持仓穿透计算，乘以 0.92 动态系数</div>
-            <div class="intro-item"><b>⏳ 自动结算</b><br>晚间官方更新后，自动切换至最终收益</div>
-            <div class="intro-item"><b>📊 偏差监控</b><br>实时 vs 最终，一眼看清估值误差</div>
-            <div class="intro-item"><b>⚡ 多线程同步</b><br>秒级拉取 10 大重仓股实时报价</div>
+    # 更新顶部卡片
+    hero_container.markdown(f"""
+        <div class="hero-card">
+            <div style="font-size: 11px; opacity: 0.5; letter-spacing: 1px; margin-bottom: 8px;">{"周末休市 · 锁定官方结算" if is_weekend else "交易时段 · 实时监控中"}</div>
+            <div style="font-size: 52px; font-weight: 900; line-height: 1;">¥ {mixed_total_profit:+.2f}</div>
+            <div style="font-size: 14px; opacity: 0.7; margin-top: 8px;">本金: ¥ {total_m:,.0f} &nbsp; | &nbsp; 收益率: {(mixed_total_profit/total_m*100):+.2f}%</div>
         </div>
     """, unsafe_allow_html=True)
-    st.info("👈 点击左侧侧边栏开始录入第一笔资产")
+
+else:
+    st.markdown('<div class="hero-card" style="background:white; color:#1c1c1e; border:1px solid #e5e5ea;"><h2>待录入资产</h2><p>点击侧边栏添加基金</p></div>', unsafe_allow_html=True)
