@@ -7,68 +7,32 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 from streamlit_autorefresh import st_autorefresh
 
-# ================= 1. 基础配置 (完全保持原样) =================
+# ================= 1. 基础配置 (UI完全保持不变) =================
 st.set_page_config(page_title="涨涨乐Pro", page_icon="📈", layout="centered")
 st_autorefresh(interval=60 * 1000, key="global_refresh")
 
 st.markdown("""
 <style>
     .stApp { background-color: #f5f7f9; }
-    
-    /* 顶部行情栏 */
-    .market-scroll {
-        display: flex; gap: 8px; overflow-x: auto; padding: 5px 2px;
-        scrollbar-width: none; margin-bottom: 10px;
-    }
-    .market-card-small {
-        background: white; border: 1px solid #eee; border-radius: 6px;
-        min-width: 80px; text-align: center; padding: 8px 4px;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-    }
-    
-    /* 核心资产卡 */
-    .hero-box {
-        background: linear-gradient(135deg, #2c3e50 0%, #000000 100%);
-        color: white; border-radius: 12px; padding: 20px;
-        text-align: center; margin-bottom: 20px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-    }
-    
-    /* 基金卡片容器 */
-    .fund-container {
-        background: white; border-radius: 8px; padding: 12px;
-        border: 1px solid #e0e0e0; margin-bottom: 5px; 
-    }
-    
-    /* 删除按钮样式 */
-    div[data-testid="column"] button {
-        padding: 0px 8px !important;
-        min-height: 0px !important;
-        height: 30px !important;
-        line-height: 1 !important;
-        border: 1px solid #f0f0f0;
-    }
-    
-    /* 字体颜色 */
+    .market-scroll { display: flex; gap: 8px; overflow-x: auto; padding: 5px 2px; scrollbar-width: none; margin-bottom: 10px; }
+    .market-card-small { background: white; border: 1px solid #eee; border-radius: 6px; min-width: 80px; text-align: center; padding: 8px 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+    .hero-box { background: linear-gradient(135deg, #2c3e50 0%, #000000 100%); color: white; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+    .fund-container { background: white; border-radius: 8px; padding: 12px; border: 1px solid #e0e0e0; margin-bottom: 5px; }
+    div[data-testid="column"] button { padding: 0px 8px !important; min-height: 0px !important; height: 30px !important; line-height: 1 !important; border: 1px solid #f0f0f0; }
     .t-red { color: #e74c3c; font-weight: bold; }
     .t-green { color: #2ecc71; font-weight: bold; }
     .t-gray { color: #999; font-size: 12px; }
     .t-lbl { font-size: 10px; color: #bbb; }
-    
-    /* 股票列表样式 (新功能专用，不影响外部) */
-    .stock-row {
-        display: flex; justify-content: space-between; font-size: 12px; 
-        padding: 5px 0; border-bottom: 1px dashed #f5f5f5; align-items: center;
-    }
+    .stock-row { display: flex; justify-content: space-between; font-size: 12px; padding: 5px 0; border-bottom: 1px dashed #f5f5f5; align-items: center; }
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 2. 数据库 (保持不变) =================
-conn = sqlite3.connect('zzl_v30_fixed.db', check_same_thread=False)
+# ================= 2. 数据库 =================
+conn = sqlite3.connect('zzl_v31_final.db', check_same_thread=False)
 conn.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, portfolio TEXT)')
 current_user = 'admin'
 
-# ================= 3. 数据获取逻辑 (仅优化了 stock 部分) =================
+# ================= 3. 数据获取逻辑 (核心修复在 get_fund_stocks) =================
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_indices():
@@ -95,7 +59,7 @@ def get_indices():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_details(code):
-    """获取基金详情(保持原样)"""
+    """获取基金详情"""
     try:
         r_gs = requests.get(f"http://fundgz.1234567.com.cn/js/{code}.js", timeout=1.5)
         r_jz = requests.get(f"http://fund.eastmoney.com/f10/F10DataApi.aspx?type=lsjz&code={code}&page=1&per=1", timeout=1.5)
@@ -137,96 +101,112 @@ def get_details(code):
                 status_txt = f"⚡ 交易中 ({gz_time})"
                 is_using_jz = False
                 
-        return {
-            "name": name, "gz": gz_val, "jz": jz_val, "jz_date": jz_date,
-            "used": used_rate, "status": status_txt, "use_jz": is_using_jz
-        }
+        return {"name": name, "gz": gz_val, "jz": jz_val, "jz_date": jz_date, "used": used_rate, "status": status_txt, "use_jz": is_using_jz}
     except:
         return None
 
-# 【核心修改】智能获取持仓（解决C类基金查不到的问题）
+# 【核心升级】三级火箭式抓取：API -> 主代码API -> 网页强抓
 @st.cache_data(ttl=300, show_spinner=False)
 def get_fund_stocks(fund_code):
     
-    # 定义一个内部函数：只负责根据给定的 code 抓取数据
-    def fetch_codes_by_api(target_code):
+    # 辅助函数：根据代码尝试 API
+    def fetch_api(target):
         stocks = []
         try:
-            # 官方 APP 接口，最全最快
-            url = f"https://fundmobapi.eastmoney.com/FundMNewApi/FundMNInverstPosition?FCODE={target_code}&deviceid=Wap&plat=Wap&product=EFund&version=6.4.4"
+            url = f"https://fundmobapi.eastmoney.com/FundMNewApi/FundMNInverstPosition?FCODE={target}&deviceid=Wap&plat=Wap&product=EFund&version=6.4.4"
             r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=2)
             data = r.json()
             if data and 'Datas' in data and data['Datas']:
                 for item in data['Datas'][:10]:
                     raw = item['GPDM']
-                    name = item['GPJC']
-                    # 自动补全交易所前缀
                     prefix = "sh" if raw.startswith('6') else ("bj" if raw.startswith(('4','8')) else "sz")
-                    stocks.append({"c": f"{prefix}{raw}", "n": name})
+                    stocks.append({"c": f"{prefix}{raw}", "n": item['GPJC']})
         except:
             pass
         return stocks
 
-    # 1. 第一步：尝试直接查这个代码 (如果是A类，直接成功)
-    stock_list = fetch_codes_by_api(fund_code)
-    
-    # 2. 第二步：如果没查到，尝试找它的“主代码/A类代码”
-    if not stock_list:
+    # 辅助函数：【终极杀招】直接抓网页 HTML
+    def fetch_html_fallback(target):
+        stocks = []
         try:
-            # 访问 pingzhongdata 找到 fS_code (Source Code)
-            url_map = f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js"
-            r_map = requests.get(url_map, timeout=1.5)
+            # 这个接口返回的是包含HTML的JS变量，专门用于网页展示，数据最全
+            url = f"https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code={target}&topline=10"
+            r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
+            # 提取 content:"..." 中的 HTML
+            match = re.search(r'content:"(.*?)",', r.text)
+            if match:
+                html_content = match.group(1).replace(r'\"', '"')
+                soup = BeautifulSoup(html_content, 'html.parser')
+                # 解析表格
+                rows = soup.find_all('tr')
+                for row in rows:
+                    tds = row.find_all('td')
+                    if len(tds) >= 2:
+                        # 只有包含股票代码的行才是有效的
+                        code_txt = tds[1].text.strip()
+                        name_txt = tds[2].text.strip()
+                        if re.match(r'^\d+$', code_txt): # 确保是数字代码
+                            prefix = "sh" if code_txt.startswith('6') else ("bj" if code_txt.startswith(('4','8')) else "sz")
+                            stocks.append({"c": f"{prefix}{code_txt}", "n": name_txt})
+        except:
+            pass
+        return stocks[:10]
+
+    # --- 第一级：尝试直接 API ---
+    stock_list = fetch_api(fund_code)
+    
+    # --- 第二级：尝试主代码 (针对 C 类) ---
+    if not stock_list:
+        master_code = fund_code
+        try:
+            # 获取主代码
+            r_map = requests.get(f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js", timeout=1.5)
             match = re.search(r'fS_code\s*=\s*"(.*?)"', r_map.text)
             if match:
                 master_code = match.group(1)
-                # 如果主代码和当前代码不一样，就去查主代码
-                if master_code and master_code != fund_code:
-                    stock_list = fetch_codes_by_api(master_code)
         except:
             pass
+        
+        if master_code != fund_code:
+            stock_list = fetch_api(master_code)
+            
+        # --- 第三级：如果 API 还是空，启动网页强抓 (针对顽固 C 类) ---
+        if not stock_list:
+            # 优先抓主代码的网页，如果没有主代码抓自己的
+            target_for_html = master_code if master_code else fund_code
+            stock_list = fetch_html_fallback(target_for_html)
 
-    # 3. 如果还是没有，说明可能是债基或者QDII延迟，放弃
+    # 如果三次努力都失败，那就真没办法了
     if not stock_list:
         return []
 
-    # 4. 第三步：去新浪查实时行情
+    # --- 批量查询行情 (保持原样) ---
     try:
         sina_codes = [x['c'] for x in stock_list]
         url_hq = f"http://hq.sinajs.cn/list={','.join(sina_codes)}"
         r_hq = requests.get(url_hq, headers={'Referer': 'https://finance.sina.com.cn'}, timeout=2)
         lines = r_hq.text.strip().split('\n')
-        
         final_res = []
-        # 建立 股票代码->股票名称 的字典，防止新浪不返回名字
-        code_to_name = {x['c']: x['n'] for x in stock_list}
+        code_map = {x['c']: x['n'] for x in stock_list}
         
         for line in lines:
             if '="' in line:
-                key = line.split('="')[0].split('hq_str_')[-1] # 获取 sz000xxx
+                key = line.split('="')[0].split('hq_str_')[-1]
                 val = line.split('="')[1]
                 parts = val.split(',')
-                
                 if len(parts) > 3:
                     curr = float(parts[3])
                     last = float(parts[2])
                     if curr == 0: curr = last
-                    
-                    pct = 0.0
-                    if last > 0:
-                        pct = (curr - last) / last * 100
-                    
-                    # 优先用新浪的名字，如果没有就用字典里的
-                    name_show = parts[0] if parts[0] else code_to_name.get(key, "--")
-                    
-                    final_res.append({"n": name_show, "v": curr, "p": pct})
-                    
+                    pct = (curr - last) / last * 100 if last > 0 else 0.0
+                    name = parts[0] if parts[0] else code_map.get(key, "--")
+                    final_res.append({"n": name, "v": curr, "p": pct})
         return final_res
     except:
         return []
 
-# ================= 4. 页面渲染 (排版布局完全不变) =================
+# ================= 4. 页面渲染 (完全保持原样) =================
 
-# 1. 顶部大盘
 st.markdown("##### 🌍 全球行情")
 idx_data = get_indices()
 if idx_data:
@@ -239,12 +219,10 @@ if idx_data:
 else:
     st.caption("行情加载中...")
 
-# 2. 读取数据
 if 'portfolio' not in st.session_state:
     row = conn.execute('SELECT portfolio FROM users WHERE username=?', (current_user,)).fetchone()
     st.session_state.portfolio = json.loads(row[0]) if row else []
 
-# 3. 计算逻辑
 total_money = 0.0
 total_profit = 0.0
 final_list = []
@@ -257,7 +235,6 @@ for p in st.session_state.portfolio:
         total_profit += profit
         final_list.append({**p, **info, 'profit_money': profit})
 
-# 4. 核心资产卡
 bg_cls = "#ff4b4b" if total_profit >= 0 else "#2ecc71"
 st.markdown(f"""
 <div class="hero-box" style="background:{bg_cls}">
@@ -267,14 +244,11 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# 5. 基金列表
 st.markdown("##### 📑 基金明细")
-
 if not final_list:
     st.info("请在左侧添加基金")
 
 for item in final_list:
-    # 标题行
     c1, c2 = st.columns([0.85, 0.15])
     with c1:
         st.markdown(f"**{item['name']}** <span style='color:#ccc; font-size:12px'>{item['c']}</span>", unsafe_allow_html=True)
@@ -286,7 +260,6 @@ for item in final_list:
             conn.commit()
             st.rerun()
 
-    # 卡片颜色逻辑
     color_gz = "#999"
     color_jz = "#999"
     wt_gz = "normal"
@@ -301,7 +274,6 @@ for item in final_list:
     
     profit_color = "#e74c3c" if item['profit_money'] >= 0 else "#2ecc71"
 
-    # 卡片 HTML
     card = f"""
     <div class="fund-container">
         <div style="display:flex; justify-content:space-between; margin-bottom:8px; border-bottom:1px dashed #eee; padding-bottom:5px;">
@@ -323,7 +295,6 @@ for item in final_list:
     """
     st.markdown(card, unsafe_allow_html=True)
     
-    # 【改动部分】仅优化了这里的逻辑，样式保持原样
     with st.expander("📊 前十持仓 (实时行情)"):
         stocks = get_fund_stocks(item['c'])
         if stocks:
@@ -340,11 +311,10 @@ for item in final_list:
         else:
             st.caption("暂无持仓数据 (可能是债基或数据未披露)")
 
-# 6. 侧边栏
 with st.sidebar:
     st.header("➕ 添加")
     with st.form("add"):
-        code = st.text_input("代码", placeholder="例如 000001")
+        code = st.text_input("代码", placeholder="例如 014143")
         money = st.number_input("本金", value=10000.0)
         if st.form_submit_button("确认"):
             res = get_details(code)
