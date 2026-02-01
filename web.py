@@ -7,7 +7,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 from streamlit_autorefresh import st_autorefresh
 
-# ================= 1. 基础配置 (UI 保持不变) =================
+# ================= 1. 基础配置 =================
 st.set_page_config(page_title="涨涨乐Pro", page_icon="📈", layout="centered")
 st_autorefresh(interval=60 * 1000, key="global_refresh")
 
@@ -15,7 +15,7 @@ st.markdown("""
 <style>
     .stApp { background-color: #f5f7f9; }
     
-    /* 顶部行情栏 */
+    /* 顶部行情 */
     .market-scroll { display: flex; gap: 8px; overflow-x: auto; padding: 5px 2px; scrollbar-width: none; margin-bottom: 10px; }
     .market-card-small { background: white; border: 1px solid #eee; border-radius: 6px; min-width: 80px; text-align: center; padding: 8px 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
     
@@ -32,7 +32,7 @@ st.markdown("""
         box-shadow: 0 2px 5px rgba(0,0,0,0.08); 
     }
     
-    /* 按钮样式美化 */
+    /* 按钮美化 */
     div[data-testid="column"] button { 
         border: 1px solid #ffcccc !important;
         background: white !important;
@@ -59,7 +59,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 2. 数据库 (保持不变) =================
+# ================= 2. 数据库 =================
 conn = sqlite3.connect('zzl_v33_final.db', check_same_thread=False)
 conn.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, portfolio TEXT)')
 current_user = 'admin'
@@ -68,7 +68,6 @@ current_user = 'admin'
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_indices():
-    # 纳指、恒生、上证、汇率
     codes = [('gb_ixic', '纳斯达克', 1, 26), ('rt_hkHSI', '恒生指数', 6, 3), ('sh000001', '上证指数', 3, 2), ('fx_susdcnh', '离岸汇率', 8, 3)]
     res = []
     try:
@@ -124,12 +123,15 @@ def get_details(code):
         return {"name": name, "gz": gz_val, "jz": jz_val, "jz_date": jz_date, "used": used_rate, "status": status_txt, "use_jz": is_using_jz}
     except: return None
 
-# 🔥🔥【V38 终极修复逻辑】智能判断：是股票显示股票，是空壳才穿透 🔥🔥
+# 🔥🔥 核心修复：智能持仓获取逻辑 🔥🔥
+# 1. 有真股票 -> 马上显示 (解决普通基金不显示问题)
+# 2. 全是ETF -> 穿透ETF (解决联接基金问题)
+# 3. 没持仓 -> 猜代码 (解决C类/空壳问题)
 @st.cache_data(ttl=300, show_spinner=False)
 def get_fund_stocks(fund_code, recursion_depth=0):
     if recursion_depth > 5: return [] 
 
-    # --- 1. 内部函数：获取原始持仓 ---
+    # --- 1. 内部工具：抓取原始数据 ---
     def fetch_raw(target):
         stocks = []
         try:
@@ -140,7 +142,7 @@ def get_fund_stocks(fund_code, recursion_depth=0):
             if data and 'Datas' in data and data['Datas']:
                 for item in data['Datas'][:10]:
                     raw = item['GPDM']
-                    # 识别 ETF 代码 (159, 51, 56, 58 开头)
+                    # 只要是 159, 51, 56, 58 开头就是 ETF
                     is_etf = raw.startswith(('159', '51', '56', '58'))
                     prefix = "sh" if raw.startswith(('6','5')) else ("bj" if raw.startswith(('4','8')) else "sz")
                     stocks.append({"c": f"{prefix}{raw}", "n": item['GPJC'], "raw": raw, "is_etf": is_etf})
@@ -150,38 +152,24 @@ def get_fund_stocks(fund_code, recursion_depth=0):
     # --- 2. 获取当前代码持仓 ---
     stock_list = fetch_raw(fund_code)
     
-    # --- 3. 智能路由判断 (关键修复点) ---
+    # --- 3. 智能判断 (修复核心) ---
     
-    # 🚩 判断A：是否包含真正的股票？
-    # 如果列表里哪怕只有1个是非ETF的真股票，说明这是个正常基金（或者混基）。
-    # 这种情况下，必须直接显示这些股票，不能去穿透ETF，否则正常基金会显示错误。
+    # 只要发现有一个是非ETF的真股票，就认定为普通基金，强制直接显示，不做任何穿透
     has_real_stock = any(not s['is_etf'] for s in stock_list)
     
     if has_real_stock:
-        # 这是一个正常基金，直接去第4步查价格
+        # 正常基金，不需要额外操作，直接去下面查价格
         pass 
         
     elif stock_list and not has_real_stock:
-        # 🚩 判断B：有持仓，但全是 ETF (联接基金/FOF)
-        # 这种情况下，我们需要取出第一个 ETF 代码，去递归查它的持仓
+        # 特殊情况：有持仓，但全是 ETF (如中概互联联接)
+        # 这种时候才去递归查那个 ETF
         first_etf = stock_list[0]['raw']
         return get_fund_stocks(first_etf, recursion_depth + 1)
         
     elif not stock_list:
-        # 🚩 判断C：完全查不到持仓 (可能是C类，或者数据缺失)
-        # 只有在真的啥都没有的时候，才去“猜”
-        
-        # 尝试1：找母基金 (pingzhongdata)
-        try:
-            r_map = requests.get(f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js", timeout=1.5)
-            match = re.search(r'fS_code\s*=\s*["\'](\d+)["\']', r_map.text)
-            if match:
-                parent = match.group(1)
-                if parent != fund_code:
-                    return get_fund_stocks(parent, recursion_depth + 1)
-        except: pass
-
-        # 尝试2：找兄弟基金 (代码 - 1) 适用于 023145(C) -> 023144(A)
+        # 特殊情况：完全查不到数据 (如C类基金)
+        # 这种时候才去猜兄弟基金 (代码减1)
         if fund_code.isdigit():
             try:
                 candidate = f"{int(fund_code)-1:06d}"
@@ -189,9 +177,9 @@ def get_fund_stocks(fund_code, recursion_depth=0):
                     return get_fund_stocks(candidate, recursion_depth + 1)
             except: pass
             
-        return [] # 真的没救了
+        return [] # 真的什么都查不到
 
-    # --- 4. 查新浪行情 (只查非ETF的股票) ---
+    # --- 4. 查新浪行情 (只查真股票) ---
     real_stocks = [x for x in stock_list if not x['is_etf']]
     if not real_stocks: return []
 
@@ -217,7 +205,7 @@ def get_fund_stocks(fund_code, recursion_depth=0):
         return final_res
     except: return []
 
-# ================= 4. 页面渲染 (保持不变) =================
+# ================= 4. 页面渲染 =================
 
 st.markdown("##### 🌍 全球行情")
 idx_data = get_indices()
@@ -302,6 +290,7 @@ for item in final_list:
     st.markdown(card, unsafe_allow_html=True)
     
     with st.expander("📊 前十持仓 (实时穿透)"):
+        # 这里调用修复后的函数
         stocks = get_fund_stocks(item['c'])
         if stocks:
             for s in stocks:
