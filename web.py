@@ -22,22 +22,32 @@ st.markdown("""
     /* 基金列表容器 */
     .fund-container { background: white; border-radius: 8px; padding: 12px; border: 1px solid #e0e0e0; margin-bottom: 5px; }
     
-    /* 【按钮微调】让“删除”按钮高度居中，去掉多余留白 */
+    /* 按钮样式微调：紧凑、灰色、右对齐感 */
     div[data-testid="column"] button { 
-        padding: 0px 0px !important; 
+        padding: 0px 10px !important; 
         min-height: 0px !important; 
-        height: 32px !important; 
-        line-height: 30px !important; 
-        border: 1px solid #f0f0f0;
-        font-size: 13px !important;
-        color: #666 !important;
+        height: 28px !important; 
+        line-height: 26px !important; 
+        border: 1px solid #eee;
+        font-size: 12px !important;
+        color: #999 !important;
+        background-color: #fff;
+        float: right; /* 尝试右浮动 */
+        width: 100%;
     }
     div[data-testid="column"] button:hover {
         border-color: #ff4b4b !important;
-        color: #ff4b4b !important;
-        background-color: #fff0f0 !important;
+        color: white !important;
+        background-color: #ff4b4b !important;
     }
     
+    /* 垂直对齐修正 */
+    .fund-name-row {
+        display: flex;
+        align-items: center;
+        height: 28px; /* 和按钮高度一致 */
+    }
+
     .t-red { color: #e74c3c; font-weight: bold; }
     .t-green { color: #2ecc71; font-weight: bold; }
     .t-gray { color: #999; font-size: 12px; }
@@ -47,15 +57,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ================= 2. 数据库 =================
-conn = sqlite3.connect('zzl_v32_del.db', check_same_thread=False)
+conn = sqlite3.connect('zzl_v33.db', check_same_thread=False)
 conn.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, portfolio TEXT)')
 current_user = 'admin'
 
-# ================= 3. 数据获取逻辑 (V31 核心逻辑保持不变) =================
+# ================= 3. 数据获取逻辑 (保持不变) =================
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_indices():
-    """获取全球行情"""
     codes = [('gb_ixic', '纳斯达克', 1, 26), ('rt_hkHSI', '恒生指数', 6, 3), ('sh000001', '上证指数', 3, 2), ('fx_susdcnh', '离岸汇率', 8, 3)]
     res = []
     try:
@@ -78,7 +87,6 @@ def get_indices():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_details(code):
-    """获取基金详情"""
     try:
         r_gs = requests.get(f"http://fundgz.1234567.com.cn/js/{code}.js", timeout=1.5)
         r_jz = requests.get(f"http://fund.eastmoney.com/f10/F10DataApi.aspx?type=lsjz&code={code}&page=1&per=1", timeout=1.5)
@@ -126,7 +134,6 @@ def get_details(code):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_fund_stocks(fund_code):
-    """三级火箭式抓取"""
     def fetch_api(target):
         stocks = []
         try:
@@ -165,26 +172,17 @@ def get_fund_stocks(fund_code):
         return stocks[:10]
 
     stock_list = fetch_api(fund_code)
-    
     if not stock_list:
         master_code = fund_code
         try:
             r_map = requests.get(f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js", timeout=1.5)
             match = re.search(r'fS_code\s*=\s*"(.*?)"', r_map.text)
-            if match:
-                master_code = match.group(1)
-        except:
-            pass
-        
-        if master_code != fund_code:
-            stock_list = fetch_api(master_code)
-            
-        if not stock_list:
-            target_for_html = master_code if master_code else fund_code
-            stock_list = fetch_html_fallback(target_for_html)
+            if match: master_code = match.group(1)
+        except: pass
+        if master_code != fund_code: stock_list = fetch_api(master_code)
+        if not stock_list: stock_list = fetch_html_fallback(master_code if master_code else fund_code)
 
-    if not stock_list:
-        return []
+    if not stock_list: return []
 
     try:
         sina_codes = [x['c'] for x in stock_list]
@@ -193,7 +191,6 @@ def get_fund_stocks(fund_code):
         lines = r_hq.text.strip().split('\n')
         final_res = []
         code_map = {x['c']: x['n'] for x in stock_list}
-        
         for line in lines:
             if '="' in line:
                 key = line.split('="')[0].split('hq_str_')[-1]
@@ -254,12 +251,20 @@ if not final_list:
     st.info("请在左侧添加基金")
 
 for item in final_list:
-    # 【改动】列宽调整，右侧给0.18，保证“删除”两个字不拥挤
-    c1, c2 = st.columns([0.82, 0.18])
+    # 【改动】列比例改为 0.75 : 0.25 (即 3:1)，保证足够宽不换行，且按钮在最右侧
+    c1, c2 = st.columns([0.75, 0.25])
+    
     with c1:
-        st.markdown(f"**{item['name']}** <span style='color:#ccc; font-size:12px'>{item['c']}</span>", unsafe_allow_html=True)
+        # 使用 div 包裹实现垂直居中
+        st.markdown(f"""
+        <div class="fund-name-row">
+            <span style="font-weight:bold; margin-right:5px;">{item['name']}</span>
+            <span style="color:#ccc; font-size:12px;">{item['c']}</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
     with c2:
-        # 【改动】图标换成文字“删除”
+        # 按钮在这一列中，CSS设置了 width:100% 和 float:right，视觉上会靠右并对齐
         if st.button("删除", key=f"del_{item['c']}"):
             new_p = [x for x in st.session_state.portfolio if x['c'] != item['c']]
             st.session_state.portfolio = new_p
