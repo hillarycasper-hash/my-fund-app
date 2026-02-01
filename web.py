@@ -3,10 +3,10 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import json
-import base64
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from streamlit_autorefresh import st_autorefresh
+import streamlit.components.v1 as components
 
 # ================= 🎨 极简 UI =================
 st.set_page_config(page_title="涨涨乐Pro", page_icon="📈", layout="wide")
@@ -16,44 +16,63 @@ st.markdown("""
     html, body, [class*="css"] { font-family: -apple-system, sans-serif !important; }
     .stApp { background: #f2f2f7; }
     .hero-card { background: #1c1c1e; color: white; padding: 25px 20px; border-radius: 24px; text-align: center; margin-bottom: 20px; }
-    .fund-card { background: white; padding: 15px; border-radius: 20px; margin-bottom: 12px; border: 1px solid #e5e5ea; }
-    .stButton > button { border: none !important; background: #f2f2f7 !important; border-radius: 50% !important; width: 26px !important; height: 26px !important; padding: 0 !important; }
-    .num-main { font-size: 22px; font-weight: 800; line-height: 1.2; }
+    .fund-card { background: white; padding: 15px; border-radius: 20px; margin-bottom: 12px; border: 1px solid #e5e5ea; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+    .num-main { font-size: 24px; font-weight: 800; line-height: 1.2; }
+    .stButton > button { border-radius: 12px !important; }
     </style>
     """, unsafe_allow_html=True)
 
-st_autorefresh(interval=90 * 1000, key="global_refresh")
+st_autorefresh(interval=60 * 1000, key="global_refresh")
 
-# ================= 💾 核心：URL 持久化逻辑 =================
+# ================= 🧠 核心：IndexedDB 自动存取逻辑 =================
 
-def encode_data(data):
-    """将数据转为 URL 安全的字符串"""
-    return base64.urlsafe_b64encode(json.dumps(data).encode()).decode()
-
-def decode_data(q_str):
-    """从 URL 还原数据"""
-    try:
-        return json.loads(base64.urlsafe_b64decode(q_str.encode()).decode())
-    except:
-        return []
-
-# 初始化数据：优先看 URL 里的参数
-query_params = st.query_params
-if "data" in query_params:
-    st.session_state.portfolio = decode_data(query_params["data"])
-elif 'portfolio' not in st.session_state:
+# 用于接收 JS 传回的数据
+if 'portfolio' not in st.session_state:
     st.session_state.portfolio = []
 
-def sync_url():
-    """同步数据到网址"""
-    if st.session_state.portfolio:
-        st.query_params["data"] = encode_data(st.session_state.portfolio)
-    else:
-        st.query_params.clear()
+# JavaScript 组件：负责在后台偷偷存数据和读数据
+def storage_manager(data_to_save=None):
+    mode = "SAVE" if data_to_save is not None else "LOAD"
+    js_code = f"""
+    <script>
+    const dbName = "ZZL_DB";
+    const request = indexedDB.open(dbName, 1);
+    
+    request.onupgradeneeded = (e) => {{
+        e.target.result.createObjectStore("settings");
+    }};
+
+    request.onsuccess = (e) => {{
+        const db = e.target.result;
+        const transaction = db.transaction("settings", "readwrite");
+        const store = transaction.objectStore("settings");
+
+        if ("{mode}" === "SAVE") {{
+            store.put({json.dumps(data_to_save)}, "portfolio");
+        }} else {{
+            const getReq = store.get("portfolio");
+            getReq.onsuccess = () => {{
+                if (getReq.result) {{
+                    window.parent.postMessage({{
+                        type: 'streamlit:setComponentValue',
+                        value: getReq.result
+                    }}, '*');
+                }}
+            }};
+        }}
+    }};
+    </script>
+    """
+    return components.html(js_code, height=0)
+
+# 自动读取
+if not st.session_state.portfolio:
+    res = storage_manager() # 调用读取模式
+    if res: st.session_state.portfolio = res
 
 # ================= 🔧 爬虫逻辑 =================
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=600)
 def get_sina_price(code):
     prefix = "sh" if code.startswith(('6', '5', '11')) else "sz" if code.startswith(('0', '3', '1', '15')) else "rt_hk" if len(code)==5 else ""
     if not prefix: return 0.0, ""
@@ -91,27 +110,26 @@ def get_info(code):
 # ================= 📊 主界面 =================
 
 with st.sidebar:
-    st.markdown("### 📥 录入")
+    st.markdown("### 📥 持仓管理")
     with st.form("add", clear_on_submit=True):
-        c = st.text_input("代码", placeholder="013279")
+        c = st.text_input("基金代码", placeholder="如: 013279")
         m = st.number_input("本金", value=10000.0)
-        if st.form_submit_button("添加", use_container_width=True):
+        if st.form_submit_button("确认添加", use_container_width=True):
             if c:
                 st.session_state.portfolio.append({"c": c, "m": m})
-                sync_url()
+                storage_manager(st.session_state.portfolio) # 保存
                 st.rerun()
-    if st.button("🗑️ 清空"):
-        st.session_state.portfolio = []
-        sync_url()
-        st.rerun()
-    if st.session_state.portfolio:
-        st.success("✅ 数据已同步至网址，请收藏本页或添加至主屏幕！")
 
+    if st.button("🗑️ 清空所有持仓", use_container_width=True):
+        st.session_state.portfolio = []
+        storage_manager([]) # 清空保存
+        st.rerun()
+
+# 核心显示区
 if st.session_state.portfolio:
     is_weekend = datetime.now().weekday() >= 5
     total_m = sum(i['m'] for i in st.session_state.portfolio)
     mixed_p = 0.0
-    
     hero_placeholder = st.empty()
     
     for idx, i in enumerate(st.session_state.portfolio):
@@ -121,25 +139,25 @@ if st.session_state.portfolio:
         mixed_p += i['m'] * (eff_r / 100)
         
         with st.container():
-            c1, c2 = st.columns([0.9, 0.1])
-            c1.markdown(f'<div style="font-size:14px; font-weight:700;">💠 {name}</div>', unsafe_allow_html=True)
+            c1, c2 = st.columns([0.88, 0.12])
+            c1.markdown(f'<div style="font-size:15px; font-weight:700;">💠 {name}</div>', unsafe_allow_html=True)
             if c2.button("✕", key=f"d_{idx}"):
                 st.session_state.portfolio.pop(idx)
-                sync_url()
+                storage_manager(st.session_state.portfolio) # 保存
                 st.rerun()
             
             st.markdown(f"""
                 <div class="fund-card" style="margin-top:-10px;">
                     <div style="display: flex; justify-content: space-between;">
                         <div style="flex:1;">
-                            <div style="font-size:10px; color:#8e8e93;">估值 [{s_d or '休市'}]</div>
+                            <div style="font-size:10px; color:#8e8e93;">实时估值 [{s_d or '获取中'}]</div>
                             <div class="num-main" style="color:{'#ff3b30' if r_r>0 else '#34c759'};">{r_r:+.2f}%</div>
-                            <div style="font-size:11px; color:{'#ff3b30' if r_r>0 else '#34c759'};">¥ {i['m']*r_r/100:+.2f}</div>
+                            <div style="font-size:12px; font-weight:700; color:{'#ff3b30' if r_r>0 else '#34c759'};">¥ {i['m']*r_r/100:+.2f}</div>
                         </div>
-                        <div style="flex:1; border-left:1px solid #f2f2f7; padding-left:10px;">
-                            <div style="font-size:10px; color:#8e8e93;">昨结 [{l_d}]</div>
+                        <div style="flex:1; border-left:1px solid #f2f2f7; padding-left:12px;">
+                            <div style="font-size:10px; color:#8e8e93;">官方昨结 [{l_d}]</div>
                             <div class="num-main" style="color:{'#ff3b30' if l_r>0 else '#34c759'};">{l_r:+.2f}%</div>
-                            <div style="font-size:11px; color:{'#ff3b30' if l_r>0 else '#34c759'};">¥ {i['m']*l_r/100:+.2f}</div>
+                            <div style="font-size:12px; font-weight:700; color:{'#ff3b30' if l_r>0 else '#34c759'};">¥ {i['m']*l_r/100:+.2f}</div>
                         </div>
                     </div>
                 </div>
@@ -147,9 +165,9 @@ if st.session_state.portfolio:
 
     hero_placeholder.markdown(f"""
         <div class="hero-card">
-            <div style="font-size: 48px; font-weight: 900;">¥ {mixed_p:+.2f}</div>
-            <div style="font-size: 13px; opacity: 0.7;">本金 ¥{total_m:,.0f} | 预估收益率 {(mixed_p/total_m*100):+.2f}%</div>
+            <div style="font-size: 52px; font-weight: 900; line-height:1;">¥ {mixed_p:+.2f}</div>
+            <div style="font-size: 14px; opacity: 0.8; margin-top:10px;">本金合计 ¥{total_m:,.0f} | 预估收益率 {(mixed_p/total_m*100):+.2f}%</div>
         </div>
     """, unsafe_allow_html=True)
 else:
-    st.markdown('<div class="hero-card" style="background:white; color:#1c1c1e; border:1px solid #e5e5ea;"><h3>无持仓数据</h3><p>请点击侧边栏添加</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="hero-card" style="background:white; color:#1c1c1e; border:1px solid #e5e5ea;"><h2>Hello.</h2><p>请在侧边栏录入基金代码开始监控</p></div>', unsafe_allow_html=True)
