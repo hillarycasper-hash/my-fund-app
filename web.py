@@ -9,7 +9,8 @@ from bs4 import BeautifulSoup
 from streamlit_autorefresh import st_autorefresh
 
 # ================= 1. 核心配置 =================
-st.set_page_config(page_title="涨涨乐Pro", page_icon="📈", layout="mobile") # 适配手机布局
+# 【修复点】：layout只能是 "centered" 或 "wide"，之前写 "mobile" 导致了崩溃
+st.set_page_config(page_title="涨涨乐Pro", page_icon="📈", layout="centered") 
 st_autorefresh(interval=60 * 1000, key="global_refresh")
 
 # CSS 样式：优化了删除按钮，使其看起来像跟在名字后面
@@ -55,7 +56,7 @@ st.markdown("""
 # ================= 2. 数据引擎 (增加休市回退逻辑) =================
 
 def init_db():
-    conn = sqlite3.connect('zzl_final_v20.db', check_same_thread=False)
+    conn = sqlite3.connect('zzl_final_v21.db', check_same_thread=False)
     conn.execute('CREATE TABLE IF NOT EXISTS users (token TEXT PRIMARY KEY, portfolio TEXT)')
     return conn
 
