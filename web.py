@@ -4,46 +4,20 @@ from bs4 import BeautifulSoup
 import re
 
 # ================= 🎨 界面基础设置 =================
-st.set_page_config(
-    page_title="涨涨乐 Pro 🚀",
-    page_icon="🚀",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="涨涨乐 Pro 🚀", layout="wide")
 
-# ================= 🔧 1. 行情获取 (实时抓取，不缓存) =================
-def get_sina_stock_price(code):
-    prefix = ""
-    if code.startswith('6') or code.startswith('5') or code.startswith('11'): prefix = "sh"
-    elif code.startswith('0') or code.startswith('3') or code.startswith('1') or code.startswith('15'): prefix = "sz"
-    elif len(code) == 5: prefix = "rt_hk"
-    
-    if not prefix: return 0.0
-    try:
-        url = f"https://hq.sinajs.cn/list={prefix}{code}"
-        res = requests.get(url, headers={'Referer': 'https://finance.sina.com.cn'}, timeout=1)
-        if len(res.text) < 20: return 0.0
-        parts = res.text.split('="')
-        vals = parts[1].strip('";').split(',')
-        if "hk" in prefix:
-            curr, last = float(vals[6]), float(vals[3])
-        else:
-            curr, last = float(vals[3]), float(vals[2])
-        if curr == 0: curr = last
-        if last > 0: return ((curr - last) / last) * 100
-    except: pass
-    return 0.0
-
-# ================= 🔧 2. 基础信息获取 (加缓存，提速核心) =================
-@st.cache_data(ttl=3600) # 缓存1小时，避免重复抓取网页
+# ================= 🔧 1. 核心抓取函数 (带缓存提速) =================
+@st.cache_data(ttl=3600)
 def get_base_info_cached(code):
-    name = f"基金-{code}"
-    nav, date = 0.0, "---"
+    """获取基金名称和昨收净值"""
+    name, nav, date = f"基金-{code}", 0.0, "---"
     try:
+        # 优先获取名称，用于快速展示
         r1 = requests.get(f"https://fundgz.1234567.com.cn/js/{code}.js", timeout=1.5)
         m1 = re.search(r'name":"(.*?)"', r1.text)
         if m1: name = m1.group(1)
         
+        # 获取昨收详情
         r2 = requests.get(f"https://fund.eastmoney.com/f10/F10DataApi.aspx?type=lsjz&code={code}&page=1&per=1", timeout=1.5)
         soup = BeautifulSoup(r2.text, 'html.parser')
         rows = soup.find_all("tr")
@@ -54,12 +28,26 @@ def get_base_info_cached(code):
     except: pass
     return name, nav, date
 
-# ================= 🔧 3. 持仓获取 (加缓存，提速核心) =================
+def get_sina_stock_price(code):
+    """获取股票/指数实时涨跌幅"""
+    prefix = ""
+    if code.startswith('6') or code.startswith('5'): prefix = "sh"
+    elif code.startswith('0') or code.startswith('3') or code.startswith('1'): prefix = "sz"
+    elif len(code) == 5: prefix = "rt_hk"
+    if not prefix: return 0.0
+    try:
+        res = requests.get(f"https://hq.sinajs.cn/list={prefix}{code}", headers={'Referer': 'https://finance.sina.com.cn'}, timeout=1)
+        vals = res.text.split('="')[1].strip('";').split(',')
+        curr, last = (float(vals[6]), float(vals[3])) if "hk" in prefix else (float(vals[3]), float(vals[2]))
+        return ((curr - last) / last) * 100 if last > 0 else 0.0
+    except: return 0.0
+
 @st.cache_data(ttl=3600)
-def get_fund_holdings_cached(fund_code):
+def get_holdings_cached(code):
+    """获取前十大持仓"""
     holdings = []
     try:
-        url = f"https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code={fund_code}&topline=10"
+        url = f"https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code={code}&topline=10"
         res = requests.get(url, timeout=2)
         match = re.search(r'content:"(.*?)"', res.text)
         if match:
@@ -74,49 +62,43 @@ def get_fund_holdings_cached(fund_code):
     except: pass
     return holdings
 
-# ================= 🔧 4. 实时计算逻辑 =================
-def calculate_realtime(fund_code, fund_name):
-    holdings = get_fund_holdings_cached(fund_code) # 使用带缓存的持仓抓取
-    factor = 0.99 if any(x in fund_name for x in ["互联网", "ETF", "联接"]) else 0.92
-    
-    if holdings:
-        total_chg = sum(get_sina_stock_price(c) * w for c, w in holdings)
-        total_w = sum(w for c, w in holdings)
-        if total_w > 0: return (total_chg / total_w) * factor
-    
-    # 保底对标逻辑
-    map_dict = {"纳指": "513100", "300": "510300", "恒生科技": "HSTECH"}
-    for k, v in map_dict.items():
-        if k in fund_name: return get_sina_stock_price(v)
-    return 0.0
-
 # ================= 🖥️ 侧边栏 =================
 with st.sidebar:
     st.title("⚙️ 操作台")
     code = st.text_input("🔢 基金代码", value="013279")
-    money = st.number_input("💰 持有金额", value=10000.0, step=1000.0)
+    money = st.number_input("💰 持有金额", value=10000.0)
     run_btn = st.button("🚀 开始分析", type="primary", use_container_width=True)
-    st.divider()
-    if st.button("🧹 清除缓存"): # 专门准备个按钮，万一数据卡了可以点一下
-        st.cache_data.clear()
+    if st.button("🧹 刷新数据"): st.cache_data.clear()
 
-# ================= 📊 主面板 =================
-st.title("🚀 涨涨乐 Pro")
+# ================= 📊 主面板 (布局优化版) =================
+st.title("📈 涨涨乐 Pro")
 st.divider()
 
 if run_btn:
-    with st.spinner('📡 正在秒速调取数据...'):
-        # 使用缓存版本的信息获取
-        name, last_rate, last_date = get_base_info_cached(code)
-        real_rate = calculate_realtime(code, name)
+    # 步骤 A: 快速获取并显示基金名字 (用户体验最快)
+    name, last_rate, last_date = get_base_info_cached(code)
+    st.subheader(f"📘 {name}")  # <--- 名字现在在最上面
+    
+    with st.spinner('📡 正在计算实时估值...'):
+        # 步骤 B: 计算实时估值
+        holdings = get_holdings_cached(code)
+        factor = 0.99 if any(x in name for x in ["互联网", "ETF", "联接"]) else 0.92
         
+        if holdings:
+            real_rate = (sum(get_sina_stock_price(c) * w for c, w in holdings) / sum(w for c, w in holdings)) * factor
+        else:
+            # 保底对标逻辑
+            real_rate = get_sina_stock_price("HSTECH") if "互联网" in name else 0.0
+
+        # 步骤 C: 展示数据卡片
         c1, c2 = st.columns(2)
         c1.metric("🔥 实时估值 (今日)", f"{real_rate:+.2f}%", f"{(money*real_rate/100):+.2f} 元", delta_color="inverse")
         c2.metric(f"📉 官方最终值 ({last_date})", f"{last_rate:+.2f}%", f"{(money*last_rate/100):+.2f} 元", delta_color="inverse")
         
-        st.markdown(f"### 📘 {name}")
         st.divider()
-        if real_rate > 0: st.success(f"🎉 建议加鸡腿！预计收益：+{(money*real_rate/100):.2f} 元")
-        else: st.error(f"🍃 莫慌，要做时间的朋友。")
+        if real_rate > 0:
+            st.success(f"🎉 建议加鸡腿！今日预估收益：+{(money*real_rate/100):.2f} 元")
+        else:
+            st.error(f"🍃 莫慌，要做时间的朋友。今日预估波动：{(money*real_rate/100):.2f} 元")
 else:
-    st.info("👈 输入代码后点击【开始分析】")
+    st.info("👈 在左侧输入代码并点击【开始分析】")
