@@ -14,28 +14,41 @@ st_autorefresh(interval=60 * 1000, key="global_refresh")
 st.markdown("""
 <style>
     .stApp { background-color: #f5f7f9; }
+    
     /* 顶部行情 */
     .market-scroll { display: flex; gap: 8px; overflow-x: auto; padding: 5px 2px; scrollbar-width: none; margin-bottom: 10px; }
     .market-card-small { background: white; border: 1px solid #eee; border-radius: 6px; min-width: 80px; text-align: center; padding: 8px 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
-    /* 核心卡片 */
-    .hero-box { background: linear-gradient(135deg, #2c3e50 0%, #000000 100%); color: white; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
-    /* 基金列表容器 */
-    .fund-container { background: white; border-radius: 8px; padding: 12px; border: 1px solid #e0e0e0; margin-bottom: 5px; }
     
-    /* 【按钮微调】让“删除”按钮高度居中，去掉多余留白 */
+    /* 核心资产卡片 */
+    .hero-box { background: linear-gradient(135deg, #2c3e50 0%, #000000 100%); color: white; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+    
+    /* 基金列表容器 - 增加了阴影和底部间距，让卡片更独立 */
+    .fund-container { 
+        background: white; 
+        border-radius: 10px; 
+        padding: 12px; 
+        border: 1px solid #e0e0e0; 
+        margin-bottom: 0px; /* 间距由外部Spacer控制 */
+        box-shadow: 0 2px 5px rgba(0,0,0,0.08); /* 增强立体感 */
+    }
+    
+    /* ============ 【按钮美化】小巧的红色胶囊 ============ */
     div[data-testid="column"] button { 
-        padding: 0px 0px !important; 
-        min-height: 0px !important; 
-        height: 32px !important; 
-        line-height: 30px !important; 
-        border: 1px solid #f0f0f0;
-        font-size: 13px !important;
-        color: #666 !important;
+        border: 1px solid #ffcccc !important;  /* 浅红色边框 */
+        background: white !important;
+        color: #ff4b4b !important;             /* 红色文字 */
+        font-size: 11px !important;            /* 字体改小 */
+        padding: 0px 8px !important;
+        min-height: 0px !important;
+        height: 24px !important;               /* 高度改小 */
+        line-height: 22px !important;
+        border-radius: 12px !important;        /* 圆角 */
+        float: right;
     }
     div[data-testid="column"] button:hover {
         border-color: #ff4b4b !important;
-        color: #ff4b4b !important;
-        background-color: #fff0f0 !important;
+        background-color: #ff4b4b !important;  /* 悬停变实心红 */
+        color: white !important;
     }
     
     .t-red { color: #e74c3c; font-weight: bold; }
@@ -47,15 +60,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ================= 2. 数据库 =================
-conn = sqlite3.connect('zzl_v32_del.db', check_same_thread=False)
+conn = sqlite3.connect('zzl_v33_final.db', check_same_thread=False)
 conn.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, portfolio TEXT)')
 current_user = 'admin'
 
-# ================= 3. 数据获取逻辑 (V31 核心逻辑保持不变) =================
+# ================= 3. 数据获取逻辑 (保持不变) =================
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_indices():
-    """获取全球行情"""
     codes = [('gb_ixic', '纳斯达克', 1, 26), ('rt_hkHSI', '恒生指数', 6, 3), ('sh000001', '上证指数', 3, 2), ('fx_susdcnh', '离岸汇率', 8, 3)]
     res = []
     try:
@@ -78,14 +90,11 @@ def get_indices():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_details(code):
-    """获取基金详情"""
     try:
         r_gs = requests.get(f"http://fundgz.1234567.com.cn/js/{code}.js", timeout=1.5)
         r_jz = requests.get(f"http://fund.eastmoney.com/f10/F10DataApi.aspx?type=lsjz&code={code}&page=1&per=1", timeout=1.5)
         
-        name = code
-        gz_val = 0.0
-        gz_time = ""
+        name = code; gz_val = 0.0; gz_time = ""
         
         if r_gs.status_code == 200:
             txt = r_gs.text
@@ -93,8 +102,7 @@ def get_details(code):
             if "gszzl" in txt: gz_val = float(re.search(r'gszzl":"(.*?)"', txt).group(1))
             if "gztime" in txt: gz_time = re.search(r'gztime":"(.*?)"', txt).group(1)
             
-        jz_val = 0.0
-        jz_date = ""
+        jz_val = 0.0; jz_date = ""
         if r_jz.status_code == 200:
             tds = BeautifulSoup(r_jz.text, 'html.parser').find_all("td")
             if len(tds) > 3:
@@ -107,26 +115,16 @@ def get_details(code):
         today_str = now.strftime("%Y-%m-%d")
         
         if is_weekend:
-            used_rate = jz_val
-            status_txt = f"☕ 休市 ({jz_date})"
-            is_using_jz = True
+            used_rate = jz_val; status_txt = f"☕ 休市 ({jz_date})"; is_using_jz = True
         else:
-            if jz_date == today_str:
-                used_rate = jz_val
-                status_txt = "✅ 今日已更新"
-                is_using_jz = True
-            else:
-                used_rate = gz_val
-                status_txt = f"⚡ 交易中 ({gz_time})"
-                is_using_jz = False
+            if jz_date == today_str: used_rate = jz_val; status_txt = "✅ 今日已更新"; is_using_jz = True
+            else: used_rate = gz_val; status_txt = f"⚡ 交易中 ({gz_time})"; is_using_jz = False
                 
         return {"name": name, "gz": gz_val, "jz": jz_val, "jz_date": jz_date, "used": used_rate, "status": status_txt, "use_jz": is_using_jz}
-    except:
-        return None
+    except: return None
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_fund_stocks(fund_code):
-    """三级火箭式抓取"""
     def fetch_api(target):
         stocks = []
         try:
@@ -138,8 +136,7 @@ def get_fund_stocks(fund_code):
                     raw = item['GPDM']
                     prefix = "sh" if raw.startswith('6') else ("bj" if raw.startswith(('4','8')) else "sz")
                     stocks.append({"c": f"{prefix}{raw}", "n": item['GPJC']})
-        except:
-            pass
+        except: pass
         return stocks
 
     def fetch_html_fallback(target):
@@ -149,42 +146,29 @@ def get_fund_stocks(fund_code):
             r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
             match = re.search(r'content:"(.*?)",', r.text)
             if match:
-                html_content = match.group(1).replace(r'\"', '"')
-                soup = BeautifulSoup(html_content, 'html.parser')
-                rows = soup.find_all('tr')
-                for row in rows:
+                soup = BeautifulSoup(match.group(1).replace(r'\"', '"'), 'html.parser')
+                for row in soup.find_all('tr'):
                     tds = row.find_all('td')
                     if len(tds) >= 2:
-                        code_txt = tds[1].text.strip()
-                        name_txt = tds[2].text.strip()
+                        code_txt = tds[1].text.strip(); name_txt = tds[2].text.strip()
                         if re.match(r'^\d+$', code_txt):
                             prefix = "sh" if code_txt.startswith('6') else ("bj" if code_txt.startswith(('4','8')) else "sz")
                             stocks.append({"c": f"{prefix}{code_txt}", "n": name_txt})
-        except:
-            pass
+        except: pass
         return stocks[:10]
 
     stock_list = fetch_api(fund_code)
-    
     if not stock_list:
         master_code = fund_code
         try:
             r_map = requests.get(f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js", timeout=1.5)
             match = re.search(r'fS_code\s*=\s*"(.*?)"', r_map.text)
-            if match:
-                master_code = match.group(1)
-        except:
-            pass
-        
-        if master_code != fund_code:
-            stock_list = fetch_api(master_code)
-            
-        if not stock_list:
-            target_for_html = master_code if master_code else fund_code
-            stock_list = fetch_html_fallback(target_for_html)
+            if match: master_code = match.group(1)
+        except: pass
+        if master_code != fund_code: stock_list = fetch_api(master_code)
+        if not stock_list: stock_list = fetch_html_fallback(master_code if master_code else fund_code)
 
-    if not stock_list:
-        return []
+    if not stock_list: return []
 
     try:
         sina_codes = [x['c'] for x in stock_list]
@@ -193,7 +177,6 @@ def get_fund_stocks(fund_code):
         lines = r_hq.text.strip().split('\n')
         final_res = []
         code_map = {x['c']: x['n'] for x in stock_list}
-        
         for line in lines:
             if '="' in line:
                 key = line.split('="')[0].split('hq_str_')[-1]
@@ -207,8 +190,7 @@ def get_fund_stocks(fund_code):
                     name = parts[0] if parts[0] else code_map.get(key, "--")
                     final_res.append({"n": name, "v": curr, "p": pct})
         return final_res
-    except:
-        return []
+    except: return []
 
 # ================= 4. 页面渲染 =================
 
@@ -254,12 +236,12 @@ if not final_list:
     st.info("请在左侧添加基金")
 
 for item in final_list:
-    # 【改动】列宽调整，右侧给0.18，保证“删除”两个字不拥挤
-    c1, c2 = st.columns([0.82, 0.18])
+    # 标题行
+    c1, c2 = st.columns([0.8, 0.2])
     with c1:
         st.markdown(f"**{item['name']}** <span style='color:#ccc; font-size:12px'>{item['c']}</span>", unsafe_allow_html=True)
     with c2:
-        # 【改动】图标换成文字“删除”
+        # 删除按钮：CSS已经把它变小、变红了
         if st.button("删除", key=f"del_{item['c']}"):
             new_p = [x for x in st.session_state.portfolio if x['c'] != item['c']]
             st.session_state.portfolio = new_p
@@ -267,20 +249,15 @@ for item in final_list:
             conn.commit()
             st.rerun()
 
-    color_gz = "#999"
-    color_jz = "#999"
-    wt_gz = "normal"
-    wt_jz = "normal"
-    
+    color_gz = "#999"; color_jz = "#999"; wt_gz = "normal"; wt_jz = "normal"
     if item['use_jz']:
-        color_jz = "#e74c3c" if item['jz'] >= 0 else "#2ecc71"
-        wt_jz = "bold"
+        color_jz = "#e74c3c" if item['jz'] >= 0 else "#2ecc71"; wt_jz = "bold"
     else:
-        color_gz = "#e74c3c" if item['gz'] >= 0 else "#2ecc71"
-        wt_gz = "bold"
+        color_gz = "#e74c3c" if item['gz'] >= 0 else "#2ecc71"; wt_gz = "bold"
     
     profit_color = "#e74c3c" if item['profit_money'] >= 0 else "#2ecc71"
 
+    # 卡片内容
     card = f"""
     <div class="fund-container">
         <div style="display:flex; justify-content:space-between; margin-bottom:8px; border-bottom:1px dashed #eee; padding-bottom:5px;">
@@ -307,16 +284,13 @@ for item in final_list:
         if stocks:
             for s in stocks:
                 s_color = "t-red" if s['p'] >= 0 else "t-green"
-                row_html = f"""
-                <div class="stock-row">
-                    <span style="flex:2; color:#333; font-weight:500;">{s['n']}</span>
-                    <span style="flex:1; text-align:right; font-family:monospace;" class="{s_color}">{s['v']:.2f}</span>
-                    <span style="flex:1; text-align:right; font-family:monospace;" class="{s_color}">{s['p']:+.2f}%</span>
-                </div>
-                """
+                row_html = f"""<div class="stock-row"><span style="flex:2; color:#333; font-weight:500;">{s['n']}</span><span style="flex:1; text-align:right; font-family:monospace;" class="{s_color}">{s['v']:.2f}</span><span style="flex:1; text-align:right; font-family:monospace;" class="{s_color}">{s['p']:+.2f}%</span></div>"""
                 st.markdown(row_html, unsafe_allow_html=True)
         else:
-            st.caption("暂无持仓数据 (可能是债基或数据未披露)")
+            st.caption("暂无持仓数据")
+    
+    # 【新增】强制分隔符：在每个基金后面加一个透明的空行，强制隔开
+    st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("➕ 添加")
@@ -333,5 +307,4 @@ with st.sidebar:
                 conn.commit()
                 st.success(f"已添加 {res['name']}")
                 st.rerun()
-            else:
-                st.error("代码错误")
+            else: st.error("代码错误")
