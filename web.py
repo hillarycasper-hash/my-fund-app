@@ -3,107 +3,97 @@ import hashlib
 import sqlite3
 import json
 
-# ================= 🎨 顶级视觉引擎 (CSS 重写) =================
+# ================= 🎨 视觉引擎：深度定制黑金 UI =================
 def apply_pro_style():
     st.markdown("""
         <style>
-        /* 1. 隐藏多余元素 */
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        header {visibility: hidden;}
+        /* 隐藏 Streamlit 默认的装饰线和空白 */
+        [data-testid="stDecoration"] {display: none;}
+        [data-testid="stHeader"] {background: rgba(0,0,0,0);}
         
-        /* 2. 全局背景：深空灰渐变 */
+        /* 全局背景 */
         .stApp {
-            background: radial-gradient(circle at top right, #2c2c2e, #1c1c1e, #000000);
+            background: #0e0e0e;
+            background-image: radial-gradient(circle at 50% -20%, #2c2c2e 0%, #0e0e0e 80%);
         }
 
-        /* 3. 登录卡片：毛玻璃效果 */
-        div[data-testid="stVerticalBlock"] > div:has(.login-box) {
-            background: rgba(255, 255, 255, 0.05);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 30px;
-            padding: 40px 30px;
-            box-shadow: 0 25px 50px rgba(0,0,0,0.5);
+        /* 修复输入框文字看不见的问题 */
+        .stTextInput input {
+            color: #ffffff !important; /* 文字纯白 */
+            background-color: rgba(255, 255, 255, 0.08) !important;
+            border: 1px solid rgba(255, 255, 255, 0.1) !important;
+            border-radius: 12px !important;
+            padding: 10px 15px !important;
+            caret-color: #d4af37 !important; /* 光标金色 */
+        }
+        
+        /* 输入框聚焦效果 */
+        .stTextInput input:focus {
+            border-color: #d4af37 !important;
+            box-shadow: 0 0 0 1px #d4af37 !important;
         }
 
-        /* 4. 标题艺术字 */
-        .glow-text {
+        /* 登录卡片容器：去掉那个多余的框 */
+        .login-container {
+            max-width: 400px;
+            margin: 0 auto;
+            padding: 2rem 1.5rem;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 28px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(15px);
             text-align: center;
-            font-family: 'Inter', sans-serif;
-            background: linear-gradient(to bottom right, #ffffff 30%, #666);
+        }
+
+        /* ZZL Logo 艺术化 */
+        .logo-font {
+            font-size: 4.5rem;
+            font-weight: 900;
+            background: linear-gradient(135deg, #fff 0%, #d4af37 50%, #8a6d3b 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            font-weight: 900;
-            letter-spacing: -1px;
             margin-bottom: 0px;
+            line-height: 1;
+            filter: drop-shadow(0 5px 15px rgba(212,175,55,0.2));
         }
 
-        /* 5. 输入框美化 */
-        .stTextInput > div > div > input {
-            background-color: rgba(255, 255, 255, 0.05) !important;
-            color: white !important;
-            border: 1px solid rgba(255, 255, 255, 0.2) !important;
-            border-radius: 12px !important;
-            height: 48px;
-        }
-        
-        /* 6. 按钮：黑金流光效果 */
+        /* 按钮样式强化 */
         .stButton > button {
-            background: linear-gradient(90deg, #d4af37, #f9d976);
-            color: #1c1c1e !important;
-            font-weight: 700 !important;
+            width: 100%;
+            background: linear-gradient(90deg, #d4af37, #f9d976) !important;
+            color: #000 !important;
             border: none !important;
-            border-radius: 12px !important;
-            height: 48px;
-            transition: all 0.3s ease;
-        }
-        .stButton > button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(212, 175, 55, 0.4);
-        }
-
-        /* 7. Tabs 样式优化 */
-        .stTabs [data-baseweb="tab-list"] {
-            background-color: transparent;
-            justify-content: center;
-        }
-        .stTabs [data-baseweb="tab"] {
-            color: #888 !important;
-        }
-        .stTabs [aria-selected="true"] {
-            color: #d4af37 !important;
-            font-weight: bold;
+            font-weight: 800 !important;
+            font-size: 1rem !important;
+            padding: 0.6rem !important;
+            border-radius: 14px !important;
+            box-shadow: 0 4px 15px rgba(212,175,55,0.3) !important;
         }
         </style>
     """, unsafe_allow_html=True)
 
-# ================= 🔐 登录界面渲染逻辑 =================
+# ================= 🔐 交互逻辑：解决注册 bug =================
 
 def show_login_page():
     apply_pro_style()
     
-    # 顶部留白
-    st.write("<div style='height: 8vh'></div>", unsafe_allow_html=True)
+    # 居中布局
+    st.write("<div style='height: 10vh'></div>", unsafe_allow_html=True)
     
-    # 整个卡片容器
-    with st.container():
-        st.markdown('<div class="login-box">', unsafe_allow_html=True)
-        
-        # 标志性标题
-        st.markdown('<h1 class="glow-text" style="font-size: 3rem;">ZZL</h1>', unsafe_allow_html=True)
-        st.markdown('<p style="text-align:center; color:#888; margin-bottom:2rem;">涨涨乐 Pro · 资产管理系统</p>', unsafe_allow_html=True)
+    # 使用自定义容器开始绘制
+    st.markdown('<div class="login-container">', unsafe_allow_html=True)
+    st.markdown('<h1 class="logo-font">ZZL</h1>', unsafe_allow_html=True)
+    st.markdown('<p style="color:#666; font-size:0.9rem; margin-bottom:2rem;">ZZL PRO · 资产管理系统</p>', unsafe_allow_html=True)
 
-        tab_login, tab_reg = st.tabs(["安全登录", "新用户注册"])
+    tab_login, tab_reg = st.tabs(["安全登录", "新用户注册"])
+    
+    with tab_login:
+        st.write("<div style='height: 20px'></div>", unsafe_allow_html=True)
+        u = st.text_input("用户名", placeholder="USERNAME", key="l_u", label_visibility="collapsed")
+        p = st.text_input("密码", type="password", placeholder="PASSWORD", key="l_p", label_visibility="collapsed")
         
-        with tab_login:
-            st.write("<div style='height: 20px'></div>", unsafe_allow_html=True)
-            u = st.text_input("USER", placeholder="输入用户名", key="l_u", label_visibility="collapsed")
-            p = st.text_input("PASS", type="password", placeholder="输入密码", key="l_p", label_visibility="collapsed")
-            st.write("<div style='height: 10px'></div>", unsafe_allow_html=True)
-            if st.button("进入系统", use_container_width=True):
-                # 你的数据库校验逻辑
+        if st.button("进入系统", key="btn_login"):
+            if u and p:
                 cur = db_conn.cursor()
                 cur.execute('SELECT password, portfolio FROM users WHERE username=?', (u,))
                 res = cur.fetchone()
@@ -113,30 +103,31 @@ def show_login_page():
                     st.session_state.portfolio = json.loads(res[1])
                     st.rerun()
                 else:
-                    st.error("验证失败，请重试")
+                    st.error("❌ 账号或密码有误")
+            else:
+                st.warning("⚠️ 请填写完整信息")
 
-        with tab_reg:
-            st.write("<div style='height: 20px'></div>", unsafe_allow_html=True)
-            nu = st.text_input("SET USER", placeholder="设置新用户名", key="r_u", label_visibility="collapsed")
-            np = st.text_input("SET PASS", type="password", placeholder="设置新密码", key="r_p", label_visibility="collapsed")
-            st.write("<div style='height: 10px'></div>", unsafe_allow_html=True)
-            if st.button("立即开启", use_container_width=True):
-                # 你的数据库插入逻辑
-                try:
-                    cur = db_conn.cursor()
-                    cur.execute('INSERT INTO users VALUES (?,?,?)', (nu, make_hashes(np), "[]"))
-                    db_conn.commit()
-                    st.success("注册成功！请切换登录")
-                except:
-                    st.error("该用户名已存在")
+    with tab_reg:
+        st.write("<div style='height: 20px'></div>", unsafe_allow_html=True)
+        nu = st.text_input("设置用户名", placeholder="NEW USERNAME", key="r_u", label_visibility="collapsed")
+        np = st.text_input("设置密码", type="password", placeholder="SET PASSWORD", key="r_p", label_visibility="collapsed")
         
-        st.markdown('</div>', unsafe_allow_html=True)
+        if st.button("立即开启", key="btn_reg"):
+            if nu and np:
+                # 显式检查是否存在
+                cur = db_conn.cursor()
+                cur.execute('SELECT username FROM users WHERE username=?', (nu,))
+                if cur.fetchone():
+                    st.error("❌ 该用户名已被占用，请换一个")
+                else:
+                    try:
+                        cur.execute('INSERT INTO users VALUES (?,?,?)', (nu, make_hashes(np), "[]"))
+                        db_conn.commit()
+                        st.success("✅ 注册成功！现在请切换到登录页")
+                        st.balloons()
+                    except Exception as e:
+                        st.error(f"注册出错了: {e}")
+            else:
+                st.warning("⚠️ 请输入想要设置的账号密码")
 
-# ================= 🏗️ 程序入口 =================
-
-if not st.session_state.get('logged_in', False):
-    show_login_page()
-else:
-    # 登录后的主程序界面...
-    st.write(f"欢迎回来，{st.session_state.username}")
-    # 这里放你原来的看板代码...
+    st.markdown('</div>', unsafe_allow_html=True)
