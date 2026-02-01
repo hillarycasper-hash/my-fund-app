@@ -15,7 +15,7 @@ st.markdown("""
 <style>
     .stApp { background-color: #f5f7f9; }
     
-    /* 顶部行情 */
+    /* 顶部行情滚动条 (保持原样，这个允许横向滑动是正常的) */
     .market-scroll { display: flex; gap: 8px; overflow-x: auto; padding: 5px 2px; scrollbar-width: none; margin-bottom: 10px; }
     .market-card-small { background: white; border: 1px solid #eee; border-radius: 6px; min-width: 80px; text-align: center; padding: 8px 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
     
@@ -25,30 +25,34 @@ st.markdown("""
     /* 基金列表容器 */
     .fund-container { background: white; border-radius: 8px; padding: 12px; border: 1px solid #e0e0e0; margin-bottom: 5px; }
 
-    /* ============ 核心修复：强制单行不滚动 ============ */
+    /* ============ 核心修复：单行不滚动逻辑 ============ */
     
-    /* 1. 强制两列在手机上绝对不堆叠，保持水平排列 */
+    /* 1. 强制 Streamlit 的列布局不换行 */
     div[data-testid="stHorizontalBlock"] {
         flex-wrap: nowrap !important;
         align-items: center !important;
+        gap: 5px !important; /* 减小列间距 */
     }
     
-    /* 2. 左侧文字列：如果文字太长，显示省略号，而不是撑开屏幕 */
+    /* 2. 第一列（文字）：强制允许缩小，不撑开屏幕 */
     div[data-testid="column"]:nth-of-type(1) {
-        min-width: 0 !important; /* 关键：允许Flex子元素缩小 */
+        flex: 1 1 auto !important;
+        min-width: 0 !important; /* ⭐ 核心代码：允许Flex子项小于内容宽度 */
         overflow: hidden !important;
     }
     
-    /* 3. 基金名字样式：配合上面的截断 */
-    .fund-name-row {
-        white-space: nowrap;       /* 强制不换行 */
+    /* 3. 文字截断样式 */
+    .fund-name-truncate {
+        white-space: nowrap;       /* 不换行 */
         overflow: hidden;          /* 超出隐藏 */
-        text-overflow: ellipsis;   /* 超出显示... */
+        text-overflow: ellipsis;   /* 显示省略号... */
         font-size: 15px;
         font-weight: bold;
         color: #333;
-        line-height: 36px; /* 垂直居中，与按钮高度对齐 */
+        line-height: 36px;
+        display: block;            /* 确保占据块级空间 */
     }
+    
     .fund-code-tiny {
         font-size: 12px; 
         color: #999; 
@@ -56,28 +60,34 @@ st.markdown("""
         margin-left: 4px;
     }
 
-    /* 4. 右侧按钮列：固定宽度，紧凑 */
+    /* 4. 第二列（按钮）：固定极小宽度 */
     div[data-testid="column"]:nth-of-type(2) {
-        flex: 0 0 auto !important; /* 不许伸缩 */
-        width: auto !important;
-        padding-left: 0px !important;
+        flex: 0 0 40px !important; /* 锁死宽度40px */
+        width: 40px !important;
+        min-width: 40px !important;
+        padding: 0 !important;
     }
 
-    /* 5. 极简垃圾桶按钮 */
+    /* 5. 极简垃圾桶按钮样式 */
     div[data-testid="column"] button {
         border: none !important;
         background: transparent !important;
-        color: #ccc !important;   /* 默认浅灰，不抢眼 */
+        color: #ccc !important;   
         padding: 0px !important;
-        font-size: 16px !important; /* 图标大小 */
-        height: 36px !important;    /* 高度与文字行高一致 */
+        font-size: 18px !important; /* 图标稍大一点 */
+        height: 36px !important;    
         line-height: 36px !important;
         margin: 0 !important;
-        width: 100%;
-        text-align: right;          /* 靠右对齐 */
+        width: 100% !important;
+        display: flex;
+        justify-content: center;
+        align-items: center;
     }
     div[data-testid="column"] button:hover {
-        color: #ff4b4b !important; /* 悬停变红 */
+        color: #ff4b4b !important;
+        background: transparent !important;
+    }
+    div[data-testid="column"] button:active {
         background: transparent !important;
     }
 
@@ -91,7 +101,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ================= 2. 数据库逻辑 (保持) =================
-conn = sqlite3.connect('zzl_v36_oneline.db', check_same_thread=False)
+conn = sqlite3.connect('zzl_v36_fixed.db', check_same_thread=False)
 conn.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, portfolio TEXT)')
 current_user = 'admin'
 
@@ -256,21 +266,21 @@ if not final_list:
     st.info("请在左侧添加基金")
 
 for item in final_list:
-    # --- 核心布局：名字+按钮在同一行，不滚动 ---
+    # --- 核心布局：名字+按钮 同一行，名字过长自动截断不滚动 ---
     
-    # 比例 85% : 15% 
-    # CSS 已确保 .fund-name-row 会自动截断过长文字，不会挤开按钮
+    # 比例设置不重要了，因为CSS锁死了宽度
+    # 这里的关键是让第二列只占极小空间
     c_name, c_btn = st.columns([0.85, 0.15])
     
     with c_name:
+        # 使用 div 包裹，类名 fund-name-truncate 触发CSS截断
         st.markdown(f"""
-        <div class="fund-name-row">
+        <div class="fund-name-truncate">
             {item['name']}<span class="fund-code-tiny">{item['c']}</span>
         </div>
         """, unsafe_allow_html=True)
         
     with c_btn:
-        # 使用图标 🗑 代表删除，非常省空间
         if st.button("🗑", key=f"del_{item['c']}"):
             new_p = [x for x in st.session_state.portfolio if x['c'] != item['c']]
             st.session_state.portfolio = new_p
