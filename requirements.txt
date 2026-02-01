@@ -7,3 +7,6 @@ streamlit
 requests
 beautifulsoup4
 streamlit-autorefresh
+
+streamlit-js-eval
+
