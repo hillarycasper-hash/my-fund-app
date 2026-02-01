@@ -13,73 +13,31 @@ st_autorefresh(interval=60 * 1000, key="global_refresh")
 
 st.markdown("""
 <style>
-    /* 全局禁止横向滚动 (最后一道防线) */
-    .stApp { 
-        background-color: #f5f7f9; 
-        overflow-x: hidden !important; 
-    }
-    
+    .stApp { background-color: #f5f7f9; }
     /* 顶部行情 */
     .market-scroll { display: flex; gap: 8px; overflow-x: auto; padding: 5px 2px; scrollbar-width: none; margin-bottom: 10px; }
     .market-card-small { background: white; border: 1px solid #eee; border-radius: 6px; min-width: 80px; text-align: center; padding: 8px 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
-    
     /* 核心卡片 */
     .hero-box { background: linear-gradient(135deg, #2c3e50 0%, #000000 100%); color: white; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+    /* 基金列表容器 */
+    .fund-container { background: white; border-radius: 8px; padding: 12px; border: 1px solid #e0e0e0; margin-bottom: 5px; }
     
-    /* 基金容器 */
-    .fund-container { background: white; border-radius: 8px; padding: 12px 12px 4px 12px; border: 1px solid #e0e0e0; margin-bottom: 5px; }
-
-    /* ============ 核心修复：负边距布局 ============ */
-    
-    /* 1. 基金标题行：预留右侧空间给按钮，防止文字盖住按钮 */
-    .fund-header-row {
-        padding-right: 30px; /* 右侧留空，给X按钮腾位置 */
-        margin-bottom: 0px;  /* 紧贴下方 */
-        height: 30px;        /* 固定高度 */
-        line-height: 30px;
+    /* 【按钮微调】让“删除”按钮高度居中，去掉多余留白 */
+    div[data-testid="column"] button { 
+        padding: 0px 0px !important; 
+        min-height: 0px !important; 
+        height: 32px !important; 
+        line-height: 30px !important; 
+        border: 1px solid #f0f0f0;
+        font-size: 13px !important;
+        color: #666 !important;
     }
-    
-    /* 2. 基金名称：单行截断 */
-    .fund-name-text {
-        font-size: 15px;
-        font-weight: bold;
-        color: #333;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        display: block;
-    }
-    
-    .fund-code-tiny { font-size: 12px; color: #999; margin-left: 4px; font-weight: normal; }
-
-    /* 3. 悬浮删除按钮样式 (模拟成普通文本 X) */
-    .element-container button {
-        float: right !important;      /* 靠右 */
-        margin-top: -34px !important; /* ⭐核心：往上提34像素，进入上一行 */
-        border: none !important;
-        background: transparent !important;
-        color: #ccc !important;
-        font-size: 20px !important;   /* 大一点的 X */
-        line-height: 30px !important;
-        padding: 0 !important;
-        height: 30px !important;
-        width: 30px !important;
-        min-height: 0 !important;
-        z-index: 10 !important;       /* 保证浮在文字上面 */
-    }
-    
-    .element-container button:hover {
+    div[data-testid="column"] button:hover {
+        border-color: #ff4b4b !important;
         color: #ff4b4b !important;
-        background: transparent !important;
+        background-color: #fff0f0 !important;
     }
     
-    /* 清除 Streamlit 按钮默认的聚焦边框 */
-    .element-container button:focus {
-        box-shadow: none !important;
-        color: #ff4b4b !important;
-    }
-
-    /* 涨跌色 & 布局辅助 */
     .t-red { color: #e74c3c; font-weight: bold; }
     .t-green { color: #2ecc71; font-weight: bold; }
     .t-gray { color: #999; font-size: 12px; }
@@ -88,14 +46,16 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 2. 数据库逻辑 =================
-conn = sqlite3.connect('zzl_v37_nomargin.db', check_same_thread=False)
+# ================= 2. 数据库 =================
+conn = sqlite3.connect('zzl_v32_del.db', check_same_thread=False)
 conn.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, portfolio TEXT)')
 current_user = 'admin'
 
-# ================= 3. 数据获取逻辑 (保持不变) =================
+# ================= 3. 数据获取逻辑 (V31 核心逻辑保持不变) =================
+
 @st.cache_data(ttl=30, show_spinner=False)
 def get_indices():
+    """获取全球行情"""
     codes = [('gb_ixic', '纳斯达克', 1, 26), ('rt_hkHSI', '恒生指数', 6, 3), ('sh000001', '上证指数', 3, 2), ('fx_susdcnh', '离岸汇率', 8, 3)]
     res = []
     try:
@@ -118,35 +78,55 @@ def get_indices():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_details(code):
+    """获取基金详情"""
     try:
         r_gs = requests.get(f"http://fundgz.1234567.com.cn/js/{code}.js", timeout=1.5)
         r_jz = requests.get(f"http://fund.eastmoney.com/f10/F10DataApi.aspx?type=lsjz&code={code}&page=1&per=1", timeout=1.5)
-        name = code; gz_val = 0.0; gz_time = ""
+        
+        name = code
+        gz_val = 0.0
+        gz_time = ""
+        
         if r_gs.status_code == 200:
             txt = r_gs.text
             if "name" in txt: name = re.search(r'name":"(.*?)"', txt).group(1)
             if "gszzl" in txt: gz_val = float(re.search(r'gszzl":"(.*?)"', txt).group(1))
             if "gztime" in txt: gz_time = re.search(r'gztime":"(.*?)"', txt).group(1)
-        jz_val = 0.0; jz_date = ""
+            
+        jz_val = 0.0
+        jz_date = ""
         if r_jz.status_code == 200:
             tds = BeautifulSoup(r_jz.text, 'html.parser').find_all("td")
             if len(tds) > 3:
                 jz_date = tds[0].text.strip()
                 v_str = tds[3].text.strip().replace("%","")
                 jz_val = float(v_str) if v_str else 0.0
+                
         now = datetime.now()
         is_weekend = now.weekday() >= 5
         today_str = now.strftime("%Y-%m-%d")
+        
         if is_weekend:
-            used_rate = jz_val; status_txt = f"☕ 休市 ({jz_date})"; is_using_jz = True
+            used_rate = jz_val
+            status_txt = f"☕ 休市 ({jz_date})"
+            is_using_jz = True
         else:
-            if jz_date == today_str: used_rate = jz_val; status_txt = "✅ 今日已更新"; is_using_jz = True
-            else: used_rate = gz_val; status_txt = f"⚡ 交易中 ({gz_time})"; is_using_jz = False
+            if jz_date == today_str:
+                used_rate = jz_val
+                status_txt = "✅ 今日已更新"
+                is_using_jz = True
+            else:
+                used_rate = gz_val
+                status_txt = f"⚡ 交易中 ({gz_time})"
+                is_using_jz = False
+                
         return {"name": name, "gz": gz_val, "jz": jz_val, "jz_date": jz_date, "used": used_rate, "status": status_txt, "use_jz": is_using_jz}
-    except: return None
+    except:
+        return None
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_fund_stocks(fund_code):
+    """三级火箭式抓取"""
     def fetch_api(target):
         stocks = []
         try:
@@ -158,11 +138,54 @@ def get_fund_stocks(fund_code):
                     raw = item['GPDM']
                     prefix = "sh" if raw.startswith('6') else ("bj" if raw.startswith(('4','8')) else "sz")
                     stocks.append({"c": f"{prefix}{raw}", "n": item['GPJC']})
-        except: pass
+        except:
+            pass
         return stocks
+
+    def fetch_html_fallback(target):
+        stocks = []
+        try:
+            url = f"https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code={target}&topline=10"
+            r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
+            match = re.search(r'content:"(.*?)",', r.text)
+            if match:
+                html_content = match.group(1).replace(r'\"', '"')
+                soup = BeautifulSoup(html_content, 'html.parser')
+                rows = soup.find_all('tr')
+                for row in rows:
+                    tds = row.find_all('td')
+                    if len(tds) >= 2:
+                        code_txt = tds[1].text.strip()
+                        name_txt = tds[2].text.strip()
+                        if re.match(r'^\d+$', code_txt):
+                            prefix = "sh" if code_txt.startswith('6') else ("bj" if code_txt.startswith(('4','8')) else "sz")
+                            stocks.append({"c": f"{prefix}{code_txt}", "n": name_txt})
+        except:
+            pass
+        return stocks[:10]
+
     stock_list = fetch_api(fund_code)
-    # 省略 fallback 逻辑以缩短代码，核心逻辑同前
-    if not stock_list: return []
+    
+    if not stock_list:
+        master_code = fund_code
+        try:
+            r_map = requests.get(f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js", timeout=1.5)
+            match = re.search(r'fS_code\s*=\s*"(.*?)"', r_map.text)
+            if match:
+                master_code = match.group(1)
+        except:
+            pass
+        
+        if master_code != fund_code:
+            stock_list = fetch_api(master_code)
+            
+        if not stock_list:
+            target_for_html = master_code if master_code else fund_code
+            stock_list = fetch_html_fallback(target_for_html)
+
+    if not stock_list:
+        return []
+
     try:
         sina_codes = [x['c'] for x in stock_list]
         url_hq = f"http://hq.sinajs.cn/list={','.join(sina_codes)}"
@@ -170,6 +193,7 @@ def get_fund_stocks(fund_code):
         lines = r_hq.text.strip().split('\n')
         final_res = []
         code_map = {x['c']: x['n'] for x in stock_list}
+        
         for line in lines:
             if '="' in line:
                 key = line.split('="')[0].split('hq_str_')[-1]
@@ -183,9 +207,11 @@ def get_fund_stocks(fund_code):
                     name = parts[0] if parts[0] else code_map.get(key, "--")
                     final_res.append({"n": name, "v": curr, "p": pct})
         return final_res
-    except: return []
+    except:
+        return []
 
 # ================= 4. 页面渲染 =================
+
 st.markdown("##### 🌍 全球行情")
 idx_data = get_indices()
 if idx_data:
@@ -202,7 +228,10 @@ if 'portfolio' not in st.session_state:
     row = conn.execute('SELECT portfolio FROM users WHERE username=?', (current_user,)).fetchone()
     st.session_state.portfolio = json.loads(row[0]) if row else []
 
-total_money = 0.0; total_profit = 0.0; final_list = []
+total_money = 0.0
+total_profit = 0.0
+final_list = []
+
 for p in st.session_state.portfolio:
     info = get_details(p['c'])
     if info:
@@ -225,35 +254,31 @@ if not final_list:
     st.info("请在左侧添加基金")
 
 for item in final_list:
-    # ----------------------------------------------------
-    # ⭐ 核心修复：不使用 st.columns，使用负边距叠加 ⭐
-    # ----------------------------------------------------
-    
-    # 1. 先画名字 (HTML)
-    # 注意：class "fund-header-row" 设置了右边距，防止字盖住按钮
-    st.markdown(f"""
-    <div class="fund-header-row">
-        <div class="fund-name-text">
-            {item['name']}<span class="fund-code-tiny">{item['c']}</span>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # 2. 再画按钮 (Streamlit 原生按钮)
-    # CSS 会自动把这个按钮往上提 34px，并且靠右浮动，看起来就在名字后面
-    if st.button("×", key=f"del_{item['c']}"):
-        new_p = [x for x in st.session_state.portfolio if x['c'] != item['c']]
-        st.session_state.portfolio = new_p
-        conn.execute('UPDATE users SET portfolio=? WHERE username=?', (json.dumps(new_p), current_user))
-        conn.commit()
-        st.rerun()
+    # 【改动】列宽调整，右侧给0.18，保证“删除”两个字不拥挤
+    c1, c2 = st.columns([0.82, 0.18])
+    with c1:
+        st.markdown(f"**{item['name']}** <span style='color:#ccc; font-size:12px'>{item['c']}</span>", unsafe_allow_html=True)
+    with c2:
+        # 【改动】图标换成文字“删除”
+        if st.button("删除", key=f"del_{item['c']}"):
+            new_p = [x for x in st.session_state.portfolio if x['c'] != item['c']]
+            st.session_state.portfolio = new_p
+            conn.execute('UPDATE users SET portfolio=? WHERE username=?', (json.dumps(new_p), current_user))
+            conn.commit()
+            st.rerun()
 
-    # 3. 剩下的卡片内容
-    color_gz = "#999"; color_jz = "#999"; wt_gz = "normal"; wt_jz = "normal"
+    color_gz = "#999"
+    color_jz = "#999"
+    wt_gz = "normal"
+    wt_jz = "normal"
+    
     if item['use_jz']:
-        color_jz = "#e74c3c" if item['jz'] >= 0 else "#2ecc71"; wt_jz = "bold"
+        color_jz = "#e74c3c" if item['jz'] >= 0 else "#2ecc71"
+        wt_jz = "bold"
     else:
-        color_gz = "#e74c3c" if item['gz'] >= 0 else "#2ecc71"; wt_gz = "bold"
+        color_gz = "#e74c3c" if item['gz'] >= 0 else "#2ecc71"
+        wt_gz = "bold"
+    
     profit_color = "#e74c3c" if item['profit_money'] >= 0 else "#2ecc71"
 
     card = f"""
@@ -277,19 +302,26 @@ for item in final_list:
     """
     st.markdown(card, unsafe_allow_html=True)
     
-    with st.expander("📊 前十持仓"):
+    with st.expander("📊 前十持仓 (实时行情)"):
         stocks = get_fund_stocks(item['c'])
         if stocks:
             for s in stocks:
                 s_color = "t-red" if s['p'] >= 0 else "t-green"
-                st.markdown(f"""<div class="stock-row"><span style="flex:2; color:#333;">{s['n']}</span><span class="{s_color}" style="flex:1; text-align:right;">{s['p']:+.2f}%</span></div>""", unsafe_allow_html=True)
+                row_html = f"""
+                <div class="stock-row">
+                    <span style="flex:2; color:#333; font-weight:500;">{s['n']}</span>
+                    <span style="flex:1; text-align:right; font-family:monospace;" class="{s_color}">{s['v']:.2f}</span>
+                    <span style="flex:1; text-align:right; font-family:monospace;" class="{s_color}">{s['p']:+.2f}%</span>
+                </div>
+                """
+                st.markdown(row_html, unsafe_allow_html=True)
         else:
-            st.caption("暂无数据")
+            st.caption("暂无持仓数据 (可能是债基或数据未披露)")
 
 with st.sidebar:
     st.header("➕ 添加")
     with st.form("add"):
-        code = st.text_input("代码", placeholder="014143")
+        code = st.text_input("代码", placeholder="例如 014143")
         money = st.number_input("本金", value=10000.0)
         if st.form_submit_button("确认"):
             res = get_details(code)
@@ -299,6 +331,7 @@ with st.sidebar:
                 st.session_state.portfolio = ls
                 conn.execute('UPDATE users SET portfolio=? WHERE username=?', (json.dumps(ls), current_user))
                 conn.commit()
-                st.success("已添加")
+                st.success(f"已添加 {res['name']}")
                 st.rerun()
-            else: st.error("代码错误")
+            else:
+                st.error("代码错误")
