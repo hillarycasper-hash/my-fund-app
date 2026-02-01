@@ -2,54 +2,36 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import re
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from streamlit_autorefresh import st_autorefresh
 
-# ================= 🎨 UI 深度重构 (CSS 注入) =================
+# ================= 🎨 顶层 UI 定制 =================
 st.set_page_config(page_title="涨涨乐 Pro", page_icon="🚀", layout="wide")
 
-# 注入全新 UI 样式
 st.markdown("""
     <style>
-    /* 1. 移除默认间距，增加呼吸感 */
-    .block-container { padding-top: 1.5rem !important; }
-    
-    /* 2. 顶部资产条美化 */
-    .header-box {
-        background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+    .main { background-color: #fcfcfc; }
+    .total-card {
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
         color: white;
-        padding: 2rem;
-        border-radius: 20px;
-        box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+        padding: 1.5rem;
+        border-radius: 24px;
+        box-shadow: 0 12px 24px rgba(0,0,0,0.15);
         margin-bottom: 2rem;
         text-align: center;
     }
-    
-    /* 3. 卡片容器美化 */
-    div.stExpander {
-        border: 1px solid #e2e8f0 !important;
-        border-radius: 16px !important;
-        background-color: white !important;
-        box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05) !important;
-        overflow: hidden;
-    }
-    
-    /* 4. 标题字体美化 */
-    h1, h2, h3 { color: #0f172a !important; font-family: 'Inter', sans-serif; }
-    
-    /* 5. 隐藏 Streamlit 默认页脚 */
-    footer {visibility: hidden;}
-    #MainMenu {visibility: hidden;}
-    
-    /* 6. 特殊 Metric 样式 */
-    [data-testid="stMetricValue"] { font-size: 24px !important; font-weight: 800 !important; }
+    .data-row { background: #ffffff; padding: 1.2rem; border-radius: 16px; border: 1px solid #f1f5f9; margin-bottom: 1rem; }
+    .metric-block { flex: 1; text-align: center; }
+    .metric-label { font-size: 0.85rem; color: #64748b; margin-bottom: 0.3rem; font-weight: 500; }
+    .metric-value { font-size: 1.6rem; font-weight: 800; }
+    .fund-title { font-size: 1.1rem; font-weight: 700; color: #1e293b; margin-bottom: 1rem; }
     </style>
     """, unsafe_allow_html=True)
 
-# 自动刷新 (60秒)
 st_autorefresh(interval=60 * 1000, key="auto_refresh")
 
-# ================= 🔧 核心逻辑 (100% 保留你的原始算法) =================
+# ================= 🔧 核心逻辑 (算法与系数 100% 保留) =================
 
 def get_sina_stock_price(code):
     prefix = ""
@@ -98,7 +80,7 @@ def get_base_info(code):
     name, nav, date = f"基金-{code}", 0.0, ""
     try:
         r1 = requests.get(f"http://fundgz.1234567.com.cn/js/{code}.js", timeout=1.5)
-        m1 = re.search(r'name":"(.*?)"', r1.text)
+        m1 = re.search(r'nameFormat":"(.*?)"', r1.text) or re.search(r'name":"(.*?)"', r1.text)
         if m1: name = m1.group(1)
         r2 = requests.get(f"http://fund.eastmoney.com/f10/F10DataApi.aspx?type=lsjz&code={code}&page=1&per=1", timeout=1.5)
         tds = BeautifulSoup(r2.text, 'html.parser').find_all("tr")[1].find_all("td")
@@ -106,69 +88,94 @@ def get_base_info(code):
     except: pass
     return name, nav, date
 
-# ================= 💾 会话状态 =================
+# ================= 💾 数据处理 =================
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = []
 
-# ================= 🖥️ 侧边栏 (轻量化) =================
 with st.sidebar:
-    st.markdown("### 📥 快速录入")
-    with st.form("add_form", clear_on_submit=True):
-        f_code = st.text_input("代码", placeholder="如 013279")
-        f_money = st.number_input("金额", value=100.0, step=100.0)
-        submitted = st.form_submit_button("添加至实盘", use_container_width=True)
-        if submitted and f_code:
-            st.session_state.portfolio.append({"code": f_code, "money": f_money})
-            st.rerun()
-    
+    st.markdown("### 📥 持仓录入")
+    with st.form("add_fund", clear_on_submit=True):
+        f_code = st.text_input("基金代码")
+        f_money = st.number_input("持有本金", value=100.0, step=100.0)
+        if st.form_submit_button("确认添加", use_container_width=True):
+            if f_code:
+                st.session_state.portfolio.append({"code": f_code, "money": f_money})
+                st.rerun()
     st.markdown("---")
-    if st.button("🧹 一键清空所有持仓", use_container_width=True):
+    if st.button("🗑️ 清空实盘"):
         st.session_state.portfolio = []
         st.rerun()
 
-# ================= 📊 主显示区 =================
+# ================= 📊 主面板 =================
 
-# 1. 顶部全屏资产条
 if st.session_state.portfolio:
-    with st.spinner('同步实时行情...'):
+    with st.spinner('📡 正在智能结算资产...'):
         total_m = sum(i['money'] for i in st.session_state.portfolio)
         results = []
+        mixed_total_profit = 0.0 # 混合盈亏总计
+        
+        # 获取今天日期字符串 (用于判断是否更新)
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        
         for i in st.session_state.portfolio:
             name, last_r, last_d = get_base_info(i['code'])
             real_r = calculate_realtime(i['code'], name)
-            results.append({"name": name, "money": i['money'], "real_r": real_r, "last_r": last_r, "date": last_d, "code": i['code']})
+            
+            # 【核心逻辑切换】
+            # 如果官方最终值的日期是今天(或最新一期)，则采用最终值盈亏；否则用实时估值
+            if last_d == today_str:
+                current_profit = i['money'] * (last_r / 100)
+                is_settled = True
+            else:
+                current_profit = i['money'] * (real_r / 100)
+                is_settled = False
+            
+            mixed_total_profit += current_profit
+            results.append({
+                "name": name, "money": i['money'], 
+                "real_r": real_r, "last_r": last_r, 
+                "date": last_d, "settled": is_settled
+            })
         
-        total_real_p = sum(r['money'] * r['real_r'] / 100 for r in results)
-        total_last_p = sum(r['money'] * r['last_r'] / 100 for r in results)
-        total_real_rate = (total_real_p / total_m * 100) if total_m > 0 else 0
-
+    # 顶部资产条 (显示混合结算后的总收益)
     st.markdown(f"""
-        <div class="header-box">
-            <p style="font-size: 1rem; opacity: 0.8; margin-bottom: 0;">实时估值总盈亏 (今日)</p>
-            <h1 style="color: white; font-size: 3.5rem; margin-top: 0;">¥ {total_real_p:+.2f}</h1>
-            <p style="font-size: 1.2rem;">总持有: ¥ {total_m:,.0f} &nbsp; | &nbsp; 今日总收益率: {total_real_rate:+.2f}%</p>
+        <div class="total-card">
+            <p style="opacity: 0.7; margin-bottom: 0.5rem;">当前账户总收益 (已自动切换结算模式)</p>
+            <h1 style="color: white; margin: 0; font-size: 3rem;">¥ {mixed_total_profit:+.2f}</h1>
+            <p style="margin-top: 0.5rem; opacity: 0.8;">今日总本金: ¥ {total_m:,.0f} &nbsp; | &nbsp; 整体盈亏率: {(mixed_total_profit/total_m*100):+.2f}%</p>
         </div>
     """, unsafe_allow_html=True)
 
-    # 2. 网格化卡片 (每行 3 个)
-    st.markdown("### 💠 持仓实时详情")
-    cols = st.columns(3)
-    for index, res in enumerate(results):
-        with cols[index % 3]:
-            # 使用简单的卡片包装
-            with st.expander(f"**{res['name']}**", expanded=True):
-                st.metric("今日估值", f"{res['real_r']:+.2f}%", f"¥ {res['money']*res['real_r']/100:+.2f}", delta_color="inverse")
-                st.markdown(f"<p style='font-size:0.8rem; color:gray'>昨结: {res['last_r']:+.2f}% ({res['date']})</p>", unsafe_allow_html=True)
-                if st.button(f"删除", key=f"del_{index}", use_container_width=True):
-                    st.session_state.portfolio.pop(index)
-                    st.rerun()
+    st.markdown("### 💠 资产详情对比")
+    for idx, res in enumerate(results):
+        with st.container():
+            # 在标题旁标注是否已按官方结算
+            settled_tag = "✅ 已按最终值结算" if res['settled'] else "⏳ 实时估值中"
+            st.markdown(f"<div class='fund-title'>📘 {res['name']} <span style='font-size:0.8rem; font-weight:normal; color:#64748b;'>[{settled_tag}]</span></div>", unsafe_allow_html=True)
+            
+            c1, c2, c3 = st.columns([10, 10, 3])
+            
+            # 实时列
+            real_color = "#ef4444" if res['real_r'] > 0 else "#22c55e"
+            c1.markdown(f"""
+                <div class="metric-block" style="border-right: 1px solid #f1f5f9; {'opacity:0.5' if res['settled'] else ''}">
+                    <div class="metric-label">🔥 实时估值</div>
+                    <div class="metric-value" style="color: {real_color};">{res['real_r']:+.2f}%</div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            # 最终值列
+            last_color = "#ef4444" if res['last_r'] > 0 else "#22c55e"
+            c2.markdown(f"""
+                <div class="metric-block" style="{'background:#f8fafc; border-radius:8px;' if res['settled'] else ''}">
+                    <div class="metric-label">📉 官方最终值 ({res['date']})</div>
+                    <div class="metric-value" style="color: {last_color};">{res['last_r']:+.2f}%</div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            if c3.button("🗑️", key=f"del_{idx}"):
+                st.session_state.portfolio.pop(idx)
+                st.rerun()
+            st.markdown("<br>", unsafe_allow_html=True)
 else:
-    st.markdown("""
-        <div class="header-box" style="background: #f1f5f9; color: #64748b;">
-            <h1 style="color: #64748b;">🚀 涨涨乐·实盘管家</h1>
-            <p>请在左侧输入基金代码，开启实时资产追踪</p>
-        </div>
-    """, unsafe_allow_html=True)
-    st.info("💡 **提示**：你可以一次性添加多只基金，每分钟系统将自动刷新最新估值。")
-
-st.markdown(f"<div style='text-align:center; padding: 2rem; color: #94a3b8;'>行情每 60 秒自动更新一次</div>", unsafe_allow_html=True)
+    st.info("💡 请在左侧侧边栏添加基金开始监控。")
