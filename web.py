@@ -15,14 +15,14 @@ st.markdown("""
 <style>
     .stApp { background-color: #f5f7f9; }
     
-    /* 顶部行情 - 保持不变 */
+    /* 顶部行情栏 */
     .market-scroll { display: flex; gap: 8px; overflow-x: auto; padding: 5px 2px; scrollbar-width: none; margin-bottom: 10px; }
     .market-card-small { background: white; border: 1px solid #eee; border-radius: 6px; min-width: 80px; text-align: center; padding: 8px 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
     
-    /* 核心资产卡片 - 保持不变 */
+    /* 核心资产卡片 */
     .hero-box { background: linear-gradient(135deg, #2c3e50 0%, #000000 100%); color: white; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
     
-    /* 基金列表容器 - 保持不变 */
+    /* 基金列表容器 */
     .fund-container { 
         background: white; 
         border-radius: 10px; 
@@ -32,7 +32,7 @@ st.markdown("""
         box-shadow: 0 2px 5px rgba(0,0,0,0.08); 
     }
     
-    /* 按钮样式 - 保持不变 */
+    /* 按钮样式微调 */
     div[data-testid="column"] button { 
         border: 1px solid #ffcccc !important;
         background: white !important;
@@ -60,8 +60,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ================= 2. 数据库 (保持不变) =================
-# 为了防止数据丢失，这里还是用 zzl_v36.db，你可以改回你之前的名字
-conn = sqlite3.connect('zzl_v36.db', check_same_thread=False)
+conn = sqlite3.connect('zzl_v37.db', check_same_thread=False)
 conn.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, portfolio TEXT)')
 current_user = 'admin'
 
@@ -69,7 +68,7 @@ current_user = 'admin'
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_indices():
-    # 全球行情逻辑保持不变
+    # 保持不变：纳斯达克、恒生、上证、汇率
     codes = [('gb_ixic', '纳斯达克', 1, 26), ('rt_hkHSI', '恒生指数', 6, 3), ('sh000001', '上证指数', 3, 2), ('fx_susdcnh', '离岸汇率', 8, 3)]
     res = []
     try:
@@ -92,7 +91,7 @@ def get_indices():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_details(code):
-    # 净值估值逻辑保持不变
+    # 保持不变：获取净值和估值
     try:
         r_gs = requests.get(f"http://fundgz.1234567.com.cn/js/{code}.js", timeout=1.5)
         r_jz = requests.get(f"http://fund.eastmoney.com/f10/F10DataApi.aspx?type=lsjz&code={code}&page=1&per=1", timeout=1.5)
@@ -120,67 +119,83 @@ def get_details(code):
         return {"name": name, "gz": gz_val, "jz": jz_val, "jz_date": jz_date, "used": used_rate, "status": status_txt, "use_jz": is_using_jz}
     except: return None
 
-# 🔥【唯一修改点】增强版持仓查询逻辑
+# 🔥🔥【V37 核心修复】强力穿透逻辑 🔥🔥
 @st.cache_data(ttl=300, show_spinner=False)
 def get_fund_stocks(fund_code, recursion_depth=0):
-    if recursion_depth > 3: return [] # 防止死循环
+    # 限制递归深度，防止死循环
+    if recursion_depth > 4: return [] 
 
-    # 1. 内部函数：去东财查原始持仓列表
+    # --- 1. 内部函数：去东财查原始持仓 ---
     def fetch_raw(target):
         stocks = []
         try:
             headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://fund.eastmoney.com/'}
+            # 这里的接口比较全，能查到ETF持仓
             url = f"https://fundmobapi.eastmoney.com/FundMNewApi/FundMNInverstPosition?FCODE={target}&deviceid=Wap&plat=Wap&product=EFund&version=6.4.4"
             r = requests.get(url, headers=headers, timeout=2)
             data = r.json()
             if data and 'Datas' in data and data['Datas']:
                 for item in data['Datas'][:10]:
                     raw = item['GPDM']
+                    # 识别是否为ETF (159/51/56/58开头)
                     is_etf = raw.startswith(('159', '51', '56', '58'))
                     prefix = "sh" if raw.startswith(('6','5')) else ("bj" if raw.startswith(('4','8')) else "sz")
                     stocks.append({"c": f"{prefix}{raw}", "n": item['GPJC'], "raw": raw, "is_etf": is_etf})
         except: pass
         return stocks
 
-    # 2. 先查当前代码
+    # --- 2. 尝试获取当前代码的持仓 ---
     stock_list = fetch_raw(fund_code)
     
-    # 3. 判断是否需要穿透：
-    #    A. 列表是空的 (023145 C类经常为空)
-    #    B. 第一大持仓是ETF (023145 有时会显示持有 159731)
-    next_target = None
+    # --- 3. 策略判断：是否需要穿透？ ---
+    # 目标：找到真正的股票（非ETF），或者找到下一个要查的基金代码
     
+    # 3.1 检查持仓里有没有 ETF
+    etf_target = None
+    for s in stock_list:
+        if s['is_etf']:
+            etf_target = s['raw']
+            break # 找到第一个ETF就去穿透它
+            
+    if etf_target:
+        # 🚀 路径A：持仓里有ETF，直接递归查这个ETF
+        return get_fund_stocks(etf_target, recursion_depth + 1)
+    
+    # 3.2 如果没有ETF，且没有股票（也就是空持仓，或者全是债券/现金）
+    # 这时候说明可能是 C类基金 或者 联接基金
     if not stock_list:
-        # 尝试去找母基金代码 (fS_code)
+        parent_target = None
+        
+        # 🚀 路径B：查 pingzhongdata 找 fS_code (母基金)
+        # 用 try 包裹，防止 404 报错打断后续逻辑
         try:
             r_map = requests.get(f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js", timeout=1.5)
             match = re.search(r'fS_code\s*=\s*["\'](\d+)["\']', r_map.text)
             if match:
-                parent = match.group(1)
-                if parent != fund_code:
-                    next_target = parent
-            
-            # 如果没找到母基金，且代码是数字，尝试减1找A类 (针对023145找023144)
-            if not next_target and fund_code.isdigit():
-                code_num = int(fund_code)
-                candidate = f"{code_num-1:06d}" # 盲猜兄弟代码
-                if candidate != fund_code:
-                     # 递归去查兄弟
-                     return get_fund_stocks(candidate, recursion_depth + 1)
+                found = match.group(1)
+                if found != fund_code:
+                    parent_target = found
         except: pass
 
-    elif stock_list[0]['is_etf']:
-        # 如果第一名是ETF，直接穿透它
-        next_target = stock_list[0]['raw']
+        if parent_target:
+             return get_fund_stocks(parent_target, recursion_depth + 1)
 
-    # 4. 如果找到了目标，递归调用
-    if next_target:
-        return get_fund_stocks(next_target, recursion_depth + 1)
+        # 🚀 路径C：如果路径B失败（比如C类没有js文件），尝试“代码减1”找A类
+        # 针对 023145 (C) -> 023144 (A) 的情况
+        if fund_code.isdigit():
+            try:
+                code_num = int(fund_code)
+                candidate = f"{code_num-1:06d}"
+                if candidate != fund_code:
+                    # 递归去查兄弟代码
+                    return get_fund_stocks(candidate, recursion_depth + 1)
+            except: pass
 
-    # 5. 到这里说明找到了真正的股票，去查新浪行情
+    # --- 4. 如果到了这里，说明找到了真正的股票 ---
     real_stocks = [x for x in stock_list if not x['is_etf']]
     if not real_stocks: return []
 
+    # --- 5. 查新浪实时行情 ---
     try:
         sina_codes = [x['c'] for x in real_stocks]
         url_hq = f"http://hq.sinajs.cn/list={','.join(sina_codes)}"
@@ -203,7 +218,7 @@ def get_fund_stocks(fund_code, recursion_depth=0):
         return final_res
     except: return []
 
-# ================= 4. 页面渲染 (界面保持不变) =================
+# ================= 4. 页面渲染 (保持不变) =================
 
 st.markdown("##### 🌍 全球行情")
 idx_data = get_indices()
@@ -287,6 +302,7 @@ for item in final_list:
     """
     st.markdown(card, unsafe_allow_html=True)
     
+    # 持仓展开部分
     with st.expander("📊 前十持仓 (穿透版)"):
         stocks = get_fund_stocks(item['c'])
         if stocks:
