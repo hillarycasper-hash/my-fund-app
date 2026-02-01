@@ -8,167 +8,296 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 from streamlit_autorefresh import st_autorefresh
 
-# ================= 🎨 布局适配 =================
+# ================= 🎨 1. 深度美化与配置 =================
 st.set_page_config(page_title="涨涨乐Pro", page_icon="📈", layout="wide")
-st_autorefresh(interval=60 * 1000, key="global_refresh") # 60秒自动刷新
+st_autorefresh(interval=60 * 1000, key="global_refresh") # 1分钟自动刷新
 
+# 隐藏默认的 ugly 菜单和加载条，使用自定义 CSS 美化
 st.markdown("""
     <style>
-    .stApp { background: #f2f2f7; }
-    .hero-card { background: #1c1c1e; color: white; padding: 25px; border-radius: 24px; text-align: center; margin-bottom: 20px; }
-    .fund-card { background: white; padding: 18px; border-radius: 20px; margin-bottom: 12px; border: 1px solid #e5e5ea; }
-    .num-bold { font-size: 24px; font-weight: 800; }
-    .money-tag { font-size: 16px; font-weight: 600; margin-top: 5px; }
-    .status-tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: #eee; color: #8e8e93; }
+    /* 全局背景 */
+    .stApp { background-color: #f5f7f9; }
+    
+    /* 顶部行情卡片 */
+    .market-card {
+        background: white; 
+        padding: 12px; 
+        border-radius: 12px; 
+        text-align: center; 
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        transition: transform 0.2s;
+        margin-bottom: 5px;
+    }
+    .market-card:hover { transform: translateY(-2px); }
+    .m-name { font-size: 12px; color: #666; margin-bottom: 4px; }
+    .m-price { font-size: 18px; font-weight: 800; font-family: 'DIN Alternate', sans-serif; }
+    .m-change { font-size: 11px; font-weight: 600; margin-top: 2px; }
+    
+    /* 核心资产卡片 (黑金风格) */
+    .hero-card { 
+        background: linear-gradient(135deg, #1e1e1e 0%, #2d2d2d 100%); 
+        color: #e5c07b; 
+        padding: 30px; 
+        border-radius: 24px; 
+        text-align: center; 
+        margin-bottom: 25px; 
+        box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+    }
+    
+    /* 基金列表卡片 */
+    .fund-row {
+        background: white;
+        padding: 20px;
+        border-radius: 16px;
+        margin-bottom: 15px;
+        border-left: 5px solid #ddd;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.03);
+    }
+    
+    /* 涨跌颜色定义 */
+    .up { color: #eb4d3d !important; }   /* 红涨 */
+    .down { color: #27c25c !important; } /* 绿跌 */
+    .flat { color: #888 !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# ================= 🔧 增强版抓取引擎 =================
+# ================= 🔧 2. 核心功能 (已隐藏代码提示) =================
+
 def init_db():
-    conn = sqlite3.connect('zzl_pro_v12.db', check_same_thread=False)
+    conn = sqlite3.connect('zzl_final_v15.db', check_same_thread=False)
     conn.execute('CREATE TABLE IF NOT EXISTS users (token TEXT PRIMARY KEY, portfolio TEXT)')
     return conn
 
 db_conn = init_db()
 
-@st.cache_data(ttl=60)
-def get_fund_full_data(code):
-    """同时从两个接口拿数据，确保 014143 这种代码不会漏掉"""
+# 关键修改：show_spinner=False 彻底隐藏那个丑陋的 running 代码提示
+@st.cache_data(ttl=30, show_spinner=False)
+def get_market_dashboard():
+    """获取多维市场数据：上证、创业、恒生、纳指、美元离岸"""
+    # 新浪财经接口代码
+    codes = [
+        ('sh000001', '上证指数'),
+        ('sz399006', '创业板指'),
+        ('rt_hkHSI', '恒生指数'),
+        ('gb_ixic',  '纳斯达克'),
+        ('fx_susdcnh', '美元/人民币') 
+    ]
+    results = []
     try:
-        # 接口1：获取名称和估值
-        r1 = requests.get(f"http://fundgz.1234567.com.cn/js/{code}.js", timeout=2)
-        name = re.search(r'nameFormat":"(.*?)"', r1.text).group(1) if "nameFormat" in r1.text else re.search(r'name":"(.*?)"', r1.text).group(1)
+        url = f"http://hq.sinajs.cn/list={','.join([c[0] for c in codes])}"
+        r = requests.get(url, headers={'Referer': 'https://finance.sina.com.cn'}, timeout=2)
+        lines = r.text.strip().split('\n')
         
-        # 接口2：获取昨日结算涨幅
-        r2 = requests.get(f"http://fund.eastmoney.com/f10/F10DataApi.aspx?type=lsjz&code={code}&page=1&per=1", timeout=2)
+        for i, line in enumerate(lines):
+            if len(line) < 20: continue
+            parts = line.split('="')[1].split(',')
+            name = codes[i][1]
+            
+            # 解析不同市场的格式
+            if 'fx_' in codes[i][0]: # 汇率
+                cur = float(parts[8])
+                last = float(parts[3])
+            elif 'gb_' in codes[i][0]: # 美股
+                cur = float(parts[1])
+                last = float(parts[26])
+            elif 'hk' in codes[i][0]: # 港股
+                cur = float(parts[6])
+                last = float(parts[3])
+            else: # A股
+                cur = float(parts[3])
+                last = float(parts[2])
+                
+            change = cur - last
+            pct = (change / last) * 100
+            results.append({"n": name, "p": cur, "c": change, "pct": pct})
+    except:
+        # 如果接口挂了，返回空列表，UI层会处理，不会报错
+        pass
+    return results
+
+# 关键修改：show_spinner=False，用户不会看到 get_fund_full_data 这行字
+@st.cache_data(ttl=60, show_spinner=False)
+def get_fund_details(code):
+    try:
+        # 接口1：实时
+        r1 = requests.get(f"http://fundgz.1234567.com.cn/js/{code}.js", timeout=1.5)
+        # 接口2：历史
+        r2 = requests.get(f"http://fund.eastmoney.com/f10/F10DataApi.aspx?type=lsjz&code={code}&page=1&per=1", timeout=1.5)
+        
+        name = "未知基金"
+        if "nameFormat" in r1.text:
+            name = re.search(r'nameFormat":"(.*?)"', r1.text).group(1)
+        elif "name" in r1.text:
+            name = re.search(r'name":"(.*?)"', r1.text).group(1)
+            
+        # 实时估值
+        r_real = 0.0
+        if "gszzl" in r1.text:
+            r_real = float(re.search(r'gszzl":"(.*?)"', r1.text).group(1))
+            
+        # 昨日数据
+        l_r = 0.0
+        l_d = "--"
         tds = BeautifulSoup(r2.text, 'html.parser').find_all("td")
-        l_r = float(tds[3].text.strip().replace("%",""))
-        l_d = tds[0].text.strip()
-        
-        # 实时涨幅（如果是周末，接口1可能不准，这里做二次校验）
-        r_r = float(re.search(r'gszzl":"(.*?)"', r1.text).group(1)) if "gszzl" in r1.text else 0.0
-        
-        return {"name": name, "last_r": l_r, "last_d": l_d, "real_r": r_r}
+        if len(tds) > 3:
+            l_d = tds[0].text.strip()
+            l_r_str = tds[3].text.strip().replace("%","")
+            l_r = float(l_r_str) if l_r_str else 0.0
+            
+        return {"name": name, "real": r_real, "last": l_r, "date": l_d}
     except:
         return None
 
-@st.cache_data(ttl=60)
-def get_indices():
-    indices = {"sh000001": "上证指数", "sz399006": "创业板指", "gb_ixic": "纳斯达克"}
-    data = []
-    try:
-        url = f"http://hq.sinajs.cn/list={','.join(indices.keys())}"
-        res = requests.get(url, headers={'Referer': 'https://finance.sina.com.cn'}, timeout=1.5)
-        lines = res.text.strip().split('\n')
-        for i, (code, n) in enumerate(indices.items()):
-            v = lines[i].split('="')[1].split(',')
-            curr, last = float(v[3]), float(v[2])
-            data.append({"name": n, "price": curr, "chg": (curr - last) / last * 100})
-    except: pass
-    return data
-
-# ================= 🚪 登录系统 =================
+# ================= 🚪 3. 登录逻辑 =================
 if 'user_token' not in st.session_state: st.session_state.user_token = None
+if 'portfolio' not in st.session_state: st.session_state.portfolio = []
 
 if not st.session_state.user_token:
-    st.markdown("<h1 style='text-align:center;'>📈 ZZL Pro</h1>", unsafe_allow_html=True)
-    tk = st.text_input("识别码", placeholder="输入码进入")
-    if st.button("开启系统", use_container_width=True, type="primary"):
-        res = db_conn.execute('SELECT portfolio FROM users WHERE token=?', (tk,)).fetchone()
-        st.session_state.user_token = tk
-        st.session_state.portfolio = json.loads(res[0]) if res else []
-        st.rerun()
-    if st.button("生成新码", use_container_width=True):
-        new_tk = str(random.randint(100000, 999999))
-        st.session_state.user_token = new_tk
-        st.session_state.portfolio = []
-        st.rerun()
+    st.markdown("<br><br><br>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1,2,1])
+    with c2:
+        st.markdown("<h1 style='text-align:center;'>🚀 涨涨乐 Pro</h1>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align:center;color:#888;'>极简 · 实时 · 纯净</p>", unsafe_allow_html=True)
+        tk = st.text_input("🔑 请输入识别码", placeholder="例如: 888888")
+        if st.button("立即进入", type="primary", use_container_width=True):
+            if tk:
+                res = db_conn.execute('SELECT portfolio FROM users WHERE token=?', (tk,)).fetchone()
+                st.session_state.user_token = tk
+                st.session_state.portfolio = json.loads(res[0]) if res else []
+                st.rerun()
+        
+        if st.button("我是新用户 (生成识别码)", use_container_width=True):
+            new_tk = str(random.randint(100000, 999999))
+            st.session_state.user_token = new_tk
+            st.session_state.portfolio = []
+            st.rerun()
     st.stop()
 
-# ================= 📊 看板内容 =================
-# 1. 顶部晴雨表
-m_data = get_indices()
-if m_data:
-    cols = st.columns(3)
-    for idx, item in enumerate(m_data):
-        c = "#ff3b30" if item['chg'] > 0 else "#34c759"
-        cols[idx].markdown(f"<div class='index-card'><div style='font-size:12px;color:#8e8e93;'>{item['name']}</div><div style='font-size:20px;font-weight:800;color:{c};'>{item['price']:.2f}</div><div style='font-size:12px;color:{c};'>{item['chg']:+.2f}%</div></div>", unsafe_allow_html=True)
+# ================= 📊 4. 精美看板 =================
 
-# 2. 核心计算逻辑
-is_weekend = datetime.now().weekday() >= 5
-total_m = sum(float(i['m']) for i in st.session_state.portfolio)
-total_p = 0.0
-hero_placeholder = st.empty()
+# --- 顶部：多维市场晴雨表 (修复图1问题) ---
+st.markdown("### 🌏 市场概览")
+indices = get_market_dashboard()
 
-if not st.session_state.portfolio:
-    st.info("💡 您的资产库为空，请点击侧边栏添加。")
+if not indices:
+    st.warning("📡 数据接口连接中，请稍候...")
 else:
-    for idx, i in enumerate(st.session_state.portfolio):
-        data = get_fund_full_data(i['c'])
-        if not data: continue
+    # 动态创建 5 列
+    cols = st.columns(5)
+    for i, data in enumerate(indices):
+        c_cls = "up" if data['c'] > 0 else ("down" if data['c'] < 0 else "flat")
+        arrow = "▲" if data['c'] > 0 else ("▼" if data['c'] < 0 else "")
+        sign = "+" if data['c'] > 0 else ""
         
-        # 周末逻辑：涨幅显示0，收益金额按周五算
-        display_r = 0.0 if is_weekend else data['real_r']
-        profit_money = i['m'] * (data['last_r'] / 100) if is_weekend else i['m'] * (data['real_r'] / 100)
-        total_p += profit_money
-        
-        status = "休市(周五结)" if is_weekend else "实时预估"
-        main_c = "#ff3b30" if (data['last_r'] if is_weekend else display_r) >= 0 else "#34c759"
-
-        with st.container():
-            c1, c2 = st.columns([0.9, 0.1])
-            c1.markdown(f"💠 **{data['name']}** ({i['c']})")
-            if c2.button("✕", key=f"del_{idx}"):
-                st.session_state.portfolio.pop(idx)
-                db_conn.execute('INSERT OR REPLACE INTO users VALUES (?,?)', (st.session_state.user_token, json.dumps(st.session_state.portfolio)))
-                db_conn.commit()
-                st.rerun()
-            
+        with cols[i]:
             st.markdown(f"""
-                <div class="fund-card" style="margin-top:-10px;">
-                    <div style="display: flex; justify-content: space-between;">
-                        <div>
-                            <span class="status-tag">{status}</span>
-                            <div class="num-bold" style="color:{main_c};">{display_r:+.2f}%</div>
-                            <div class="money-tag" style="color:{main_c};">涨跌额: ¥ {profit_money:+.2f}</div>
-                        </div>
-                        <div style="text-align:right; border-left:1px solid #eee; padding-left:15px;">
-                            <div style="font-size:10px; color:#8e8e93;">昨日结算 [{data['last_d']}]</div>
-                            <div style="font-size:18px; font-weight:700; color:{'#ff3b30' if data['last_r']>=0 else '#34c759'};">
-                                {data['last_r']:+.2f}%
-                            </div>
-                            <div style="font-size:12px; color:#8e8e93; margin-top:5px;">持仓: ¥ {float(i['m']):,.0f}</div>
-                        </div>
-                    </div>
+            <div class="market-card">
+                <div class="m-name">{data['n']}</div>
+                <div class="m-price {c_cls}">{data['p']:.2f}</div>
+                <div class="m-change {c_cls}">
+                    {arrow} {data['pct']:.2f}% <br>
+                    <span style="opacity:0.7; font-size:10px;">({sign}{data['c']:.2f})</span>
                 </div>
+            </div>
             """, unsafe_allow_html=True)
 
-# 3. 总损益卡片
-hero_placeholder.markdown(f"""
-    <div class="hero-card">
-        <div style="font-size: 13px; opacity: 0.8;">今日{'预估' if not is_weekend else '周五总结'}损益 (CNY)</div>
-        <div style="font-size: 52px; font-weight: 900;">¥ {total_p:+.2f}</div>
-        <div style="font-size: 14px; opacity: 0.9;">本金: ¥{total_m:,.0f} | 收益率: {(total_p/total_m*100) if total_m>0 else 0:+.2f}%</div>
+st.markdown("---")
+
+# --- 中部：资产计算 ---
+is_weekend = datetime.now().weekday() >= 5
+total_asset = sum(float(i['m']) for i in st.session_state.portfolio)
+day_profit = 0.0
+
+# 预先计算总收益
+valid_portfolio = []
+for item in st.session_state.portfolio:
+    d = get_fund_details(item['c'])
+    if d:
+        # 核心逻辑：周末用昨收，平时用实时
+        rate = 0.0 if is_weekend else d['real']
+        profit = item['m'] * (d['last'] / 100) if is_weekend else item['m'] * (d['real'] / 100)
+        day_profit += profit
+        valid_portfolio.append({**item, **d, 'profit_money': profit, 'use_rate': rate})
+
+# 渲染黑金总资产卡片
+st.markdown(f"""
+<div class="hero-card">
+    <div style="font-size:14px; opacity:0.8; letter-spacing:1px;">今日{'预估' if not is_weekend else '总结'}收益 (CNY)</div>
+    <div style="font-size:48px; font-weight:900; margin:10px 0; color:{'#ff4d4f' if day_profit>=0 else '#27c25c'};">
+        {'+' if day_profit>0 else ''}{day_profit:,.2f}
     </div>
+    <div style="background:rgba(255,255,255,0.1); display:inline-block; padding:5px 15px; border-radius:15px; font-size:13px;">
+        总本金: ¥{total_asset:,.0f}  |  收益率: {(day_profit/total_asset*100) if total_asset>0 else 0:+.2f}%
+    </div>
+</div>
 """, unsafe_allow_html=True)
 
-# ================= 🛠️ 侧边栏 =================
+# --- 底部：持仓列表 (增加涨跌额显示) ---
+c1, c2 = st.columns([0.8, 0.2])
+c1.subheader("📑 持仓明细")
+if c2.button("退出", use_container_width=True):
+    st.session_state.user_token = None
+    st.rerun()
+
+if not valid_portfolio:
+    st.info("💡 暂无持仓，请在左侧侧边栏添加基金。")
+
+for p in valid_portfolio:
+    # 颜色逻辑：红涨绿跌
+    color_cls = "up" if (p['last'] if is_weekend else p['real']) >= 0 else "down"
+    border_color = "#eb4d3d" if (p['last'] if is_weekend else p['real']) >= 0 else "#27c25c"
+    
+    # 动态状态标签
+    status_html = f'<span style="background:#f0f0f0; padding:2px 6px; border-radius:4px; font-size:10px; color:#666;">⏳ 休市(周五结)</span>' if is_weekend else f'<span style="background:#fff0f0; padding:2px 6px; border-radius:4px; font-size:10px; color:#eb4d3d;">🔥 实时预估</span>'
+
+    with st.container():
+        # 自定义卡片布局
+        col_main, col_del = st.columns([0.9, 0.1])
+        with col_main:
+            st.markdown(f"""
+            <div class="fund-row" style="border-left-color: {border_color};">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div>
+                        <div style="font-size:16px; font-weight:bold; color:#333;">{p['name']} <span style="font-size:12px; color:#999; font-weight:normal;">{p['c']}</span></div>
+                        <div style="margin-top:6px;">
+                            {status_html}
+                            <span style="margin-left:10px; font-size:13px; color:#666;">本金: ¥{float(p['m']):,.0f}</span>
+                        </div>
+                    </div>
+                    <div style="text-align:right;">
+                        <div class="{color_cls}" style="font-size:24px; font-weight:800;">{p['use_rate']:+.2f}%</div>
+                        <div class="{color_cls}" style="font-size:14px; font-weight:600;">¥ {p['profit_money']:+.2f}</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        if col_del.button("✕", key=f"del_{p['c']}", help="删除此基金"):
+            st.session_state.portfolio = [x for x in st.session_state.portfolio if x['c'] != p['c']]
+            db_conn.execute('INSERT OR REPLACE INTO users VALUES (?,?)', (st.session_state.user_token, json.dumps(st.session_state.portfolio)))
+            db_conn.commit()
+            st.rerun()
+
+# ================= 🛠️ 5. 侧边栏 (极简风格) =================
 with st.sidebar:
-    st.markdown(f"🆔 用户: `{st.session_state.user_token}`")
-    if st.button("退出登录"):
-        st.session_state.user_token = None
-        st.rerun()
-    st.markdown("---")
-    with st.form("add"):
-        f_c = st.text_input("基金代码")
-        f_m = st.number_input("持有本金", value=10000.0)
-        if st.form_submit_button("验证并添加", use_container_width=True):
-            with st.spinner('同步中...'):
-                check = get_fund_full_data(f_c)
-                if check:
-                    st.session_state.portfolio.append({"c": f_c, "m": f_m})
-                    db_conn.execute('INSERT OR REPLACE INTO users VALUES (?,?)', (st.session_state.user_token, json.dumps(st.session_state.portfolio)))
+    st.markdown("### ➕ 快速加仓")
+    with st.form("add_fund"):
+        code = st.text_input("基金代码", placeholder="如: 014143")
+        money = st.number_input("持有金额", value=10000.0, step=1000.0)
+        if st.form_submit_button("添加 / 更新", use_container_width=True):
+            with st.spinner("🔍 正在校验..."): # 这里用自定义提示替代了原来的代码提示
+                check = get_fund_details(code)
+                if check and check['name'] != "未知基金":
+                    # 存在则更新，不存在则追加
+                    new_list = [x for x in st.session_state.portfolio if x['c'] != code]
+                    new_list.append({"c": code, "m": money})
+                    st.session_state.portfolio = new_list
+                    db_conn.execute('INSERT OR REPLACE INTO users VALUES (?,?)', (st.session_state.user_token, json.dumps(new_list)))
                     db_conn.commit()
+                    st.success(f"已添加: {check['name']}")
                     st.rerun()
                 else:
-                    st.error("⚠️ 代码无效或系统繁忙，请重试！")
+                    st.error("❌ 代码无效，请检查")
+
+    st.markdown("---")
+    st.info(f"当前用户: {st.session_state.user_token}")
