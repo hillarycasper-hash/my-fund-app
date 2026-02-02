@@ -145,17 +145,19 @@ def get_details(code):
         return {"name": name, "gz": gz_val, "jz": jz_val, "jz_date": jz_date, "used": used_rate, "status": status_txt, "use_jz": is_using_jz}
     except: return None
 
-# 🔥🔥🔥【V43 终极穿透版】🔥🔥🔥
-# 核心逻辑：C类 -> 找A类 -> 找ETF -> 找股票。无限套娃，直到找到股票为止。
+# 🔥🔥🔥【V44 智能穿透修复版】专治 018897 类多层嵌套 🔥🔥🔥
 @st.cache_data(ttl=300, show_spinner=False)
-def get_fund_stocks(fund_code, recursion_depth=0):
-    # 防止死循环（比如基金A投基金B，基金B投基金A）
-    if recursion_depth > 5: return [] 
+def get_fund_stocks(fund_code, visited=None):
+    if visited is None: visited = set()
+    if fund_code in visited: return [] # 防止死循环
+    visited.add(fund_code)
+    
+    # 递归深度限制
+    if len(visited) > 6: return []
 
-    # 1. 尝试获取持仓（优先API，失败则爬虫兜底）
-    def fetch_holdings(target):
+    # 1. 尝试直接获取持仓 (API)
+    def fetch_api_holdings(target):
         stocks = []
-        # 方法A: 手机API (最全，包含股票和ETF持仓)
         try:
             headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://fund.eastmoney.com/'}
             url = f"https://fundmobapi.eastmoney.com/FundMNewApi/FundMNInverstPosition?FCODE={target}&deviceid=Wap&plat=Wap&product=EFund&version=6.4.4"
@@ -164,80 +166,86 @@ def get_fund_stocks(fund_code, recursion_depth=0):
             if data and 'Datas' in data and data['Datas']:
                 for item in data['Datas'][:10]:
                     raw = item['GPDM']
-                    # 识别 ETF：159, 51, 56, 58 开头通常是场内基金
                     is_etf = raw.startswith(('159', '51', '56', '58'))
                     prefix = "sh" if raw.startswith(('6','5')) else ("bj" if raw.startswith(('4','8')) else "sz")
                     stocks.append({"c": f"{prefix}{raw}", "n": item['GPJC'], "raw": raw, "is_etf": is_etf})
         except: pass
-        
-        # 方法B: 网页爬虫兜底 (如果API返回空)
-        if not stocks:
-            try:
-                url = f"https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code={target}&topline=10"
-                r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
-                match = re.search(r'content:"(.*?)",', r.text)
-                if match:
-                    html_content = match.group(1).replace(r'\"', '"')
-                    soup = BeautifulSoup(html_content, 'html.parser')
-                    for row in soup.find_all('tr'):
-                        tds = row.find_all('td')
-                        if len(tds) >= 2:
-                            code_txt = tds[1].text.strip()
-                            name_txt = tds[2].text.strip()
-                            if re.match(r'^\d+$', code_txt):
-                                is_etf = code_txt.startswith(('159', '51', '56', '58'))
-                                prefix = "sh" if code_txt.startswith(('6','5')) else ("bj" if code_txt.startswith(('4','8')) else "sz")
-                                stocks.append({"c": f"{prefix}{code_txt}", "n": name_txt, "raw": code_txt, "is_etf": is_etf})
-            except: pass
         return stocks
 
-    # --- 核心决策流程 ---
+    # 2. 备用：爬虫扫描页面上的关联代码 (关键修复点)
+    # 当API为空时，去页面里找：可能是A类代码，也可能是ETF代码
+    def scan_html_for_links(target):
+        found_codes = []
+        try:
+            # 访问持仓明细页或概况页，寻找链接
+            urls = [
+                f"http://fundf10.eastmoney.com/ccmx_{target}.html", # 持仓明细
+                f"http://fundf10.eastmoney.com/jjcc_{target}.html", # 基金持仓
+                f"http://fund.eastmoney.com/{target}.html"         # 概况页
+            ]
+            for url in urls:
+                r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=2)
+                # 正则寻找所有指向 fund.eastmoney.com/XXXXXX.html 的链接
+                # 尤其关注 ETF (159/51) 和 A类 (非本代码)
+                links = re.findall(r'fund\.eastmoney\.com/(\d{6})\.html', r.text)
+                for code in links:
+                    if code != target and code not in visited:
+                        found_codes.append(code)
+                if found_codes: break 
+        except: pass
+        return found_codes
 
-    # 步骤A: 获取当前基金的持仓
-    current_holdings = fetch_holdings(fund_code)
+    # --- 执行逻辑 ---
+    
+    # A. 拿持仓
+    current_holdings = fetch_api_holdings(fund_code)
 
-    # 步骤B: 【关键修复】如果是C类（持仓为空），必须找爸爸（A类）
+    # B. 判断是否需要穿透
+    # 情况1：持仓完全为空 (C类 或 纯联接基金)
+    # 情况2：持仓里主要是ETF (ETF联接基金)
+    needs_drill_down = False
+    
     if not current_holdings:
-        parent_code = None
-        # 策略1: 查 js 映射
+        needs_drill_down = True
+    elif current_holdings[0]['is_etf']:
+        # 如果第一大持仓是ETF，直接把这个ETF作为目标钻下去
+        return get_fund_stocks(current_holdings[0]['raw'], visited)
+
+    if needs_drill_down:
+        # 1. 先尝试找 pingzhongdata 里的映射 (最快)
         try:
             r_map = requests.get(f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js", timeout=1.5)
             match = re.search(r'fS_code\s*=\s*["\'](\d+)["\']', r_map.text)
             if match:
-                found = match.group(1)
-                if found != fund_code: parent_code = found
+                parent = match.group(1)
+                if parent != fund_code:
+                    res = get_fund_stocks(parent, visited)
+                    if res: return res
         except: pass
 
-        # 策略2: 查页面链接 (专门针对010052/018897这种新基金)
-        if not parent_code:
-            try:
-                r_page = requests.get(f"http://fundf10.eastmoney.com/jjcc_{fund_code}.html", timeout=2)
-                links = re.findall(r'jjcc_(\d{6})\.html', r_page.text)
-                for lk in links:
-                    if lk != fund_code:
-                        parent_code = lk
-                        break
-            except: pass
+        # 2. 如果还不行，启用【网页深度扫描】(解决 018897 -> 018896 -> 159732)
+        # 扫描页面上出现的所有基金代码链接，优先尝试 ETF (159/51)
+        linked_codes = scan_html_for_links(fund_code)
         
-        # 找到爸爸后，递归调用自己
-        if parent_code:
-            return get_fund_stocks(parent_code, recursion_depth + 1)
+        # 优先筛选 ETF 代码
+        etf_candidates = [c for c in linked_codes if c.startswith(('159', '51', '56', '58'))]
+        other_candidates = [c for c in linked_codes if not c.startswith(('159', '51', '56', '58'))]
+        
+        # 优先试 ETF
+        for target in etf_candidates:
+            res = get_fund_stocks(target, visited)
+            if res: return res
+            
+        # 再试其他关联基金 (如A类)
+        for target in other_candidates:
+            res = get_fund_stocks(target, visited)
+            if res: return res
 
-    # 步骤C: 【核心修复】检查是否为“ETF联接基金”或“嵌套基金”
-    # 如果第一大持仓是ETF，或者前几大持仓里主要是ETF，说明这是个空壳，必须穿透下去！
-    if current_holdings:
-        # 检查第一重仓是否为ETF
-        top_holding = current_holdings[0]
-        if top_holding['is_etf']:
-            # 发现是套娃！直接递归查这个ETF的持仓，扔掉当前的壳子数据
-            return get_fund_stocks(top_holding['raw'], recursion_depth + 1)
-
-    # 步骤D: 如果都不是，说明是最终的股票，去查价格
+    # C. 只有当找到了非ETF的股票，才去查价格
     return get_stock_prices(current_holdings)
 
 # 辅助函数：批量查股价
 def get_stock_prices(stock_list):
-    # 只保留真正的股票，过滤掉残留的ETF或债券
     real_stocks = [x for x in stock_list if not x.get('is_etf', False)]
     if not real_stocks: return []
 
@@ -354,7 +362,6 @@ for item in final_list:
     """
     st.markdown(card, unsafe_allow_html=True)
     
-    # 展开持仓逻辑
     with st.expander("📊 前十持仓 (智能穿透)"):
         stocks = get_fund_stocks(item['c'])
         if stocks:
@@ -363,8 +370,7 @@ for item in final_list:
                 row_html = f"""<div class="stock-row"><span style="flex:2; color:#333; font-weight:500;">{s['n']}</span><span style="flex:1; text-align:right; font-family:monospace;" class="{s_color}">{s['v']:.2f}</span><span style="flex:1; text-align:right; font-family:monospace;" class="{s_color}">{s['p']:+.2f}%</span></div>"""
                 st.markdown(row_html, unsafe_allow_html=True)
         else:
-            # 只有真的是空（QDII无数据或新发基金）才会显示这个
-            st.caption("暂无数据 (可能是新发基金、QDII或数据未披露)")
+            st.caption("暂无数据 (可能是新发基金或数据未披露)")
     
     st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True)
 
