@@ -10,7 +10,7 @@ from streamlit_autorefresh import st_autorefresh
 # ================= 1. 基础配置 =================
 st.set_page_config(page_title="涨涨乐Pro", page_icon="📈", layout="centered")
 
-# 【优化点1】自动刷新改为30秒，切后台回来感官更灵敏
+# 保持你满意的30秒刷新
 st_autorefresh(interval=30 * 1000, key="global_refresh")
 
 st.markdown("""
@@ -53,9 +53,6 @@ st.markdown("""
         color: white !important;
     }
     
-    /* 刷新按钮区域 */
-    .refresh-area { margin-bottom: 10px; }
-
     .t-red { color: #e74c3c; font-weight: bold; }
     .t-green { color: #2ecc71; font-weight: bold; }
     .t-gray { color: #999; font-size: 12px; }
@@ -93,7 +90,6 @@ def get_indices():
         return []
     return res
 
-# 🔥🔥【优化点2】精准交易时间逻辑 🔥🔥
 @st.cache_data(ttl=60, show_spinner=False)
 def get_details(code):
     try:
@@ -119,12 +115,12 @@ def get_details(code):
         now = datetime.now()
         is_weekend = now.weekday() >= 5
         today_str = now.strftime("%Y-%m-%d")
-        hm = now.strftime("%H:%M") # 当前时间 14:30
+        hm = now.strftime("%H:%M")
         
-        # 🟢 判断收盘时间：港股/恒生/H股/互联 延后到 16:00
+        # 港股等收盘时间判断
         close_time = "15:00"
         if any(keyword in name for keyword in ["港", "恒生", "H股", "互联", "纳斯达克", "标普", "QDII"]): 
-            close_time = "16:00" # QDII甚至可能更晚，暂定16点统一显示收盘
+            close_time = "16:00"
 
         if is_weekend:
             used_rate = jz_val
@@ -138,8 +134,7 @@ def get_details(code):
             else:
                 used_rate = gz_val
                 is_using_jz = False
-                
-                # 🕑 核心优化：时间段判断
+                # 保持原有的精准时间判断
                 if hm < "09:30":
                     status_txt = f"⏳ 待开盘 ({gz_time})"
                 elif "11:30" < hm < "13:00":
@@ -147,17 +142,18 @@ def get_details(code):
                 elif hm > close_time:
                     status_txt = f"🏁 已收盘 ({gz_time})"
                 else:
-                    status_txt = f"⚡ 交易中 ({gz_time})" # 保持你喜欢的这个格式
+                    status_txt = f"⚡ 交易中 ({gz_time})"
                 
         return {"name": name, "gz": gz_val, "jz": jz_val, "jz_date": jz_date, "used": used_rate, "status": status_txt, "use_jz": is_using_jz}
     except: return None
 
-# 🔥🔥 这里的逻辑一点没变，用的是 V38 修复版 🔥🔥
+# 🔥🔥【V42终极修复】完美解决 010052 等非连号 C 类基金持仓问题 🔥🔥
 @st.cache_data(ttl=300, show_spinner=False)
 def get_fund_stocks(fund_code, recursion_depth=0):
     if recursion_depth > 5: return [] 
 
-    def fetch_raw(target):
+    # 1. 尝试用手机API获取 (速度最快)
+    def fetch_api(target):
         stocks = []
         try:
             headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://fund.eastmoney.com/'}
@@ -173,35 +169,75 @@ def get_fund_stocks(fund_code, recursion_depth=0):
         except: pass
         return stocks
 
-    stock_list = fetch_raw(fund_code)
+    # 2. 备用：暴力解析HTML (解决API为空的情况)
+    def fetch_html_fallback(target):
+        stocks = []
+        try:
+            url = f"https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code={target}&topline=10"
+            r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
+            match = re.search(r'content:"(.*?)",', r.text)
+            if match:
+                html_content = match.group(1).replace(r'\"', '"')
+                soup = BeautifulSoup(html_content, 'html.parser')
+                for row in soup.find_all('tr'):
+                    tds = row.find_all('td')
+                    if len(tds) >= 2:
+                        code_txt = tds[1].text.strip()
+                        name_txt = tds[2].text.strip()
+                        if re.match(r'^\d+$', code_txt):
+                            is_etf = code_txt.startswith(('159', '51', '56', '58'))
+                            prefix = "sh" if code_txt.startswith(('6','5')) else ("bj" if code_txt.startswith(('4','8')) else "sz")
+                            stocks.append({"c": f"{prefix}{code_txt}", "n": name_txt, "raw": code_txt, "is_etf": is_etf})
+        except: pass
+        return stocks[:10]
+
+    # --- 主流程 ---
     
-    # 核心判断逻辑 (V38版)
-    has_real_stock = any(not s['is_etf'] for s in stock_list)
-    
-    if has_real_stock:
-        pass 
-    elif stock_list and not has_real_stock:
-        first_etf = stock_list[0]['raw']
-        return get_fund_stocks(first_etf, recursion_depth + 1)
-    elif not stock_list:
+    # A. 优先查自己
+    stock_list = fetch_api(fund_code)
+
+    # B. 如果没查到，说明可能是C类，必须找到A类 (Parent Code)
+    if not stock_list:
+        parent_code = None
+        
+        # 策略1: 查 pingzhongdata (最快)
         try:
             r_map = requests.get(f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js", timeout=1.5)
             match = re.search(r'fS_code\s*=\s*["\'](\d+)["\']', r_map.text)
             if match:
-                parent = match.group(1)
-                if parent != fund_code:
-                    return get_fund_stocks(parent, recursion_depth + 1)
+                found = match.group(1)
+                if found != fund_code: parent_code = found
         except: pass
 
-        if fund_code.isdigit():
+        # 策略2: 【新】如果策略1失败，直接去爬页面上的相关链接 (专门解决 010052 这种)
+        if not parent_code:
             try:
-                candidate = f"{int(fund_code)-1:06d}"
-                if candidate != fund_code:
-                    return get_fund_stocks(candidate, recursion_depth + 1)
+                # 访问C类页面，寻找指向A类页面的链接 (jjcc_004666.html)
+                r_page = requests.get(f"http://fundf10.eastmoney.com/jjcc_{fund_code}.html", timeout=2)
+                # 找所有 jjcc_xxxxxx.html 的链接
+                links = re.findall(r'jjcc_(\d{6})\.html', r_page.text)
+                for lk in links:
+                    if lk != fund_code:
+                        parent_code = lk
+                        break
             except: pass
-        return []
 
-    real_stocks = [x for x in stock_list if not x['is_etf']]
+        # 如果找到了父亲，递归查询父亲
+        if parent_code:
+            return get_fund_stocks(parent_code, recursion_depth + 1)
+            
+        # 策略3: 如果都没找到，最后试一次 HTML 暴力解析自己
+        stock_list = fetch_html_fallback(fund_code)
+
+    # C. ETF 穿透 (解决联接基金)
+    if stock_list:
+        has_real_stock = any(not s['is_etf'] for s in stock_list)
+        if not has_real_stock:
+             first_etf = stock_list[0]['raw']
+             return get_fund_stocks(first_etf, recursion_depth + 1)
+
+    # D. 查股价 (保持不变)
+    real_stocks = [x for x in stock_list if not x.get('is_etf', False)]
     if not real_stocks: return []
 
     try:
@@ -228,7 +264,7 @@ def get_fund_stocks(fund_code, recursion_depth=0):
 
 # ================= 4. 页面渲染 =================
 
-# 【优化点3】手动刷新按钮 (切后台回来点一下)
+# 顶部手动刷新按钮
 c_title, c_btn = st.columns([0.75, 0.25])
 with c_title:
     st.markdown("##### 🌍 全球行情")
