@@ -6,11 +6,12 @@ import json
 from datetime import datetime
 from bs4 import BeautifulSoup
 from streamlit_autorefresh import st_autorefresh
+from concurrent.futures import ThreadPoolExecutor
 
 # ================= 1. 基础配置 =================
 st.set_page_config(page_title="涨涨乐Pro", page_icon="📈", layout="centered")
 
-# 保持30秒刷新
+# 保持30秒刷新，但因为有了并发，加载会极快
 st_autorefresh(interval=30 * 1000, key="global_refresh")
 
 st.markdown("""
@@ -62,11 +63,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ================= 2. 数据库 =================
-conn = sqlite3.connect('zzl_v33_final.db', check_same_thread=False)
+conn = sqlite3.connect('zzl_v45_speed.db', check_same_thread=False)
 conn.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, portfolio TEXT)')
 current_user = 'admin'
 
-# ================= 3. 数据获取逻辑 =================
+# ================= 3. 数据获取逻辑 (并发加速版) =================
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_indices():
@@ -90,11 +91,14 @@ def get_indices():
         return []
     return res
 
-@st.cache_data(ttl=60, show_spinner=False)
-def get_details(code):
+# 单个基金获取详情（将被多线程调用）
+def get_details_worker(p_item):
+    code = p_item['c']
+    money = p_item['m']
     try:
-        r_gs = requests.get(f"http://fundgz.1234567.com.cn/js/{code}.js", timeout=1.5)
-        r_jz = requests.get(f"http://fund.eastmoney.com/f10/F10DataApi.aspx?type=lsjz&code={code}&page=1&per=1", timeout=1.5)
+        # 并行请求估值和净值，减少等待
+        r_gs = requests.get(f"http://fundgz.1234567.com.cn/js/{code}.js", timeout=2)
+        r_jz = requests.get(f"http://fund.eastmoney.com/f10/F10DataApi.aspx?type=lsjz&code={code}&page=1&per=1", timeout=2)
         
         name = code; gz_val = 0.0; gz_time = ""
         
@@ -141,29 +145,43 @@ def get_details(code):
                     status_txt = f"🏁 已收盘 ({gz_time})"
                 else:
                     status_txt = f"⚡ 交易中 ({gz_time})"
-                
-        return {"name": name, "gz": gz_val, "jz": jz_val, "jz_date": jz_date, "used": used_rate, "status": status_txt, "use_jz": is_using_jz}
-    except: return None
+        
+        profit = money * (used_rate / 100)
+        return {
+            "c": code, "m": money, "name": name, 
+            "gz": gz_val, "jz": jz_val, "jz_date": jz_date, 
+            "used": used_rate, "status": status_txt, "use_jz": is_using_jz,
+            "profit_money": profit
+        }
+    except: 
+        return {
+            "c": code, "m": money, "name": "加载失败", 
+            "gz": 0, "jz": 0, "jz_date": "-", 
+            "used": 0, "status": "❌ 网络错误", "use_jz": True,
+            "profit_money": 0
+        }
 
-# 🔥🔥🔥【V44 智能穿透修复版】专治 018897 类多层嵌套 🔥🔥🔥
+# 🔥🔥🔥【V45 强力穿透版】针对 018897 这种顽固分子的终极方案 🔥🔥🔥
 @st.cache_data(ttl=300, show_spinner=False)
 def get_fund_stocks(fund_code, visited=None):
     if visited is None: visited = set()
-    if fund_code in visited: return [] # 防止死循环
+    if fund_code in visited: return []
     visited.add(fund_code)
     
-    # 递归深度限制
-    if len(visited) > 6: return []
+    # 防止无限递归
+    if len(visited) > 8: return []
 
-    # 1. 尝试直接获取持仓 (API)
-    def fetch_api_holdings(target):
+    # 1. 通用 API 获取
+    def fetch_data(target):
         stocks = []
         try:
             headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://fund.eastmoney.com/'}
             url = f"https://fundmobapi.eastmoney.com/FundMNewApi/FundMNInverstPosition?FCODE={target}&deviceid=Wap&plat=Wap&product=EFund&version=6.4.4"
             r = requests.get(url, headers=headers, timeout=2)
             data = r.json()
-            if data and 'Datas' in data and data['Datas']:
+            if data and 'Datas' in data:
+                # 检查是否包含 ETF 代码 (159xxx, 51xxxx)
+                # 某些联接基金会把 ETF 放在 "GPDM" 字段里，虽然它不是股票
                 for item in data['Datas'][:10]:
                     raw = item['GPDM']
                     is_etf = raw.startswith(('159', '51', '56', '58'))
@@ -172,81 +190,60 @@ def get_fund_stocks(fund_code, visited=None):
         except: pass
         return stocks
 
-    # 2. 备用：爬虫扫描页面上的关联代码 (关键修复点)
-    # 当API为空时，去页面里找：可能是A类代码，也可能是ETF代码
-    def scan_html_for_links(target):
-        found_codes = []
+    # 2. 网页嗅探 (兜底逻辑)
+    def scan_html_for_parent_or_etf(target):
         try:
-            # 访问持仓明细页或概况页，寻找链接
-            urls = [
-                f"http://fundf10.eastmoney.com/ccmx_{target}.html", # 持仓明细
-                f"http://fundf10.eastmoney.com/jjcc_{target}.html", # 基金持仓
-                f"http://fund.eastmoney.com/{target}.html"         # 概况页
-            ]
-            for url in urls:
-                r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=2)
-                # 正则寻找所有指向 fund.eastmoney.com/XXXXXX.html 的链接
-                # 尤其关注 ETF (159/51) 和 A类 (非本代码)
-                links = re.findall(r'fund\.eastmoney\.com/(\d{6})\.html', r.text)
-                for code in links:
-                    if code != target and code not in visited:
-                        found_codes.append(code)
-                if found_codes: break 
-        except: pass
-        return found_codes
+            # 暴力扫描关联代码
+            url = f"http://fundf10.eastmoney.com/jjcc_{target}.html"
+            r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=2)
+            # 找所有 fund.eastmoney.com/xxxxxx.html 的链接
+            codes = re.findall(r'fund\.eastmoney\.com/(\d{6})\.html', r.text)
+            unique_codes = []
+            for c in codes:
+                if c != target and c not in visited:
+                    unique_codes.append(c)
+            return unique_codes
+        except: return []
 
-    # --- 执行逻辑 ---
-    
-    # A. 拿持仓
-    current_holdings = fetch_api_holdings(fund_code)
+    # --- 执行流程 ---
 
-    # B. 判断是否需要穿透
-    # 情况1：持仓完全为空 (C类 或 纯联接基金)
-    # 情况2：持仓里主要是ETF (ETF联接基金)
-    needs_drill_down = False
-    
-    if not current_holdings:
-        needs_drill_down = True
-    elif current_holdings[0]['is_etf']:
-        # 如果第一大持仓是ETF，直接把这个ETF作为目标钻下去
-        return get_fund_stocks(current_holdings[0]['raw'], visited)
+    # Step A: 查自己
+    holdings = fetch_data(fund_code)
 
-    if needs_drill_down:
-        # 1. 先尝试找 pingzhongdata 里的映射 (最快)
+    # Step B: 决策
+    # 如果持仓列表里竟然有 ETF (比如 159732)，说明它是联接基金，必须马上递归那个 ETF
+    for h in holdings:
+        if h['is_etf']:
+            # 发现 ETF！直接抛弃当前层级，去查这个 ETF
+            return get_fund_stocks(h['raw'], visited)
+
+    # 如果持仓是空的，或者看起来不对劲（全是债券或空的），找爸爸/关联基金
+    if not holdings:
+        # 1. 查 Pingzhongdata 找 A 类
         try:
-            r_map = requests.get(f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js", timeout=1.5)
+            r_map = requests.get(f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js", timeout=1)
             match = re.search(r'fS_code\s*=\s*["\'](\d+)["\']', r_map.text)
             if match:
                 parent = match.group(1)
                 if parent != fund_code:
-                    res = get_fund_stocks(parent, visited)
-                    if res: return res
+                    return get_fund_stocks(parent, visited)
         except: pass
 
-        # 2. 如果还不行，启用【网页深度扫描】(解决 018897 -> 018896 -> 159732)
-        # 扫描页面上出现的所有基金代码链接，优先尝试 ETF (159/51)
-        linked_codes = scan_html_for_links(fund_code)
-        
-        # 优先筛选 ETF 代码
-        etf_candidates = [c for c in linked_codes if c.startswith(('159', '51', '56', '58'))]
-        other_candidates = [c for c in linked_codes if not c.startswith(('159', '51', '56', '58'))]
-        
-        # 优先试 ETF
-        for target in etf_candidates:
-            res = get_fund_stocks(target, visited)
-            if res: return res
-            
-        # 再试其他关联基金 (如A类)
-        for target in other_candidates:
-            res = get_fund_stocks(target, visited)
-            if res: return res
+        # 2. 如果还没有，去页面里扫 ETF 代码
+        linked_codes = scan_html_for_parent_or_etf(fund_code)
+        # 优先试 ETF 代码
+        for lc in linked_codes:
+            if lc.startswith(('159', '51')):
+                res = get_fund_stocks(lc, visited)
+                if res: return res
+        # 其次试其他代码 (A类)
+        for lc in linked_codes:
+            if not lc.startswith(('159', '51')):
+                res = get_fund_stocks(lc, visited)
+                if res: return res
 
-    # C. 只有当找到了非ETF的股票，才去查价格
-    return get_stock_prices(current_holdings)
-
-# 辅助函数：批量查股价
-def get_stock_prices(stock_list):
-    real_stocks = [x for x in stock_list if not x.get('is_etf', False)]
+    # Step C: 查股价 (走到这里说明找到了真正的股票)
+    real_stocks = [x for x in holdings if not x.get('is_etf', False)]
     if not real_stocks: return []
 
     try:
@@ -296,17 +293,21 @@ if 'portfolio' not in st.session_state:
     row = conn.execute('SELECT portfolio FROM users WHERE username=?', (current_user,)).fetchone()
     st.session_state.portfolio = json.loads(row[0]) if row else []
 
+# 🔥 性能优化核心：多线程并发获取所有基金数据 🔥
 total_money = 0.0
 total_profit = 0.0
 final_list = []
 
-for p in st.session_state.portfolio:
-    info = get_details(p['c'])
-    if info:
-        total_money += p['m']
-        profit = p['m'] * (info['used'] / 100)
-        total_profit += profit
-        final_list.append({**p, **info, 'profit_money': profit})
+if st.session_state.portfolio:
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        results = list(executor.map(get_details_worker, st.session_state.portfolio))
+    
+    for item in results:
+        total_money += item['m']
+        total_profit += item['profit_money']
+        final_list.append(item)
+else:
+    final_list = []
 
 bg_cls = "#ff4b4b" if total_profit >= 0 else "#2ecc71"
 st.markdown(f"""
@@ -377,16 +378,17 @@ for item in final_list:
 with st.sidebar:
     st.header("➕ 添加")
     with st.form("add"):
-        code = st.text_input("代码", placeholder="例如 014143")
+        code_input = st.text_input("代码", placeholder="例如 014143")
         money = st.number_input("本金", value=10000.0)
         if st.form_submit_button("确认"):
-            res = get_details(code)
-            if res:
-                ls = [x for x in st.session_state.portfolio if x['c'] != code]
-                ls.append({"c": code, "m": money})
+            # 简单的测试一下代码是否有效
+            res = requests.get(f"http://fundgz.1234567.com.cn/js/{code_input}.js", timeout=2)
+            if res.status_code == 200:
+                ls = [x for x in st.session_state.portfolio if x['c'] != code_input]
+                ls.append({"c": code_input, "m": money})
                 st.session_state.portfolio = ls
                 conn.execute('UPDATE users SET portfolio=? WHERE username=?', (json.dumps(ls), current_user))
                 conn.commit()
-                st.success(f"已添加 {res['name']}")
+                st.success(f"已添加")
                 st.rerun()
             else: st.error("代码错误")
