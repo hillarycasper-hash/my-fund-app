@@ -10,7 +10,7 @@ from streamlit_autorefresh import st_autorefresh
 # ================= 1. 基础配置 =================
 st.set_page_config(page_title="涨涨乐Pro", page_icon="📈", layout="centered")
 
-# 保持你满意的30秒刷新
+# 保持30秒刷新
 st_autorefresh(interval=30 * 1000, key="global_refresh")
 
 st.markdown("""
@@ -117,7 +117,6 @@ def get_details(code):
         today_str = now.strftime("%Y-%m-%d")
         hm = now.strftime("%H:%M")
         
-        # 港股等收盘时间判断
         close_time = "15:00"
         if any(keyword in name for keyword in ["港", "恒生", "H股", "互联", "纳斯达克", "标普", "QDII"]): 
             close_time = "16:00"
@@ -134,7 +133,6 @@ def get_details(code):
             else:
                 used_rate = gz_val
                 is_using_jz = False
-                # 保持原有的精准时间判断
                 if hm < "09:30":
                     status_txt = f"⏳ 待开盘 ({gz_time})"
                 elif "11:30" < hm < "13:00":
@@ -147,14 +145,17 @@ def get_details(code):
         return {"name": name, "gz": gz_val, "jz": jz_val, "jz_date": jz_date, "used": used_rate, "status": status_txt, "use_jz": is_using_jz}
     except: return None
 
-# 🔥🔥【V42终极修复】完美解决 010052 等非连号 C 类基金持仓问题 🔥🔥
+# 🔥🔥🔥【V43 终极穿透版】🔥🔥🔥
+# 核心逻辑：C类 -> 找A类 -> 找ETF -> 找股票。无限套娃，直到找到股票为止。
 @st.cache_data(ttl=300, show_spinner=False)
 def get_fund_stocks(fund_code, recursion_depth=0):
+    # 防止死循环（比如基金A投基金B，基金B投基金A）
     if recursion_depth > 5: return [] 
 
-    # 1. 尝试用手机API获取 (速度最快)
-    def fetch_api(target):
+    # 1. 尝试获取持仓（优先API，失败则爬虫兜底）
+    def fetch_holdings(target):
         stocks = []
+        # 方法A: 手机API (最全，包含股票和ETF持仓)
         try:
             headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://fund.eastmoney.com/'}
             url = f"https://fundmobapi.eastmoney.com/FundMNewApi/FundMNInverstPosition?FCODE={target}&deviceid=Wap&plat=Wap&product=EFund&version=6.4.4"
@@ -163,44 +164,42 @@ def get_fund_stocks(fund_code, recursion_depth=0):
             if data and 'Datas' in data and data['Datas']:
                 for item in data['Datas'][:10]:
                     raw = item['GPDM']
+                    # 识别 ETF：159, 51, 56, 58 开头通常是场内基金
                     is_etf = raw.startswith(('159', '51', '56', '58'))
                     prefix = "sh" if raw.startswith(('6','5')) else ("bj" if raw.startswith(('4','8')) else "sz")
                     stocks.append({"c": f"{prefix}{raw}", "n": item['GPJC'], "raw": raw, "is_etf": is_etf})
         except: pass
+        
+        # 方法B: 网页爬虫兜底 (如果API返回空)
+        if not stocks:
+            try:
+                url = f"https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code={target}&topline=10"
+                r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
+                match = re.search(r'content:"(.*?)",', r.text)
+                if match:
+                    html_content = match.group(1).replace(r'\"', '"')
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    for row in soup.find_all('tr'):
+                        tds = row.find_all('td')
+                        if len(tds) >= 2:
+                            code_txt = tds[1].text.strip()
+                            name_txt = tds[2].text.strip()
+                            if re.match(r'^\d+$', code_txt):
+                                is_etf = code_txt.startswith(('159', '51', '56', '58'))
+                                prefix = "sh" if code_txt.startswith(('6','5')) else ("bj" if code_txt.startswith(('4','8')) else "sz")
+                                stocks.append({"c": f"{prefix}{code_txt}", "n": name_txt, "raw": code_txt, "is_etf": is_etf})
+            except: pass
         return stocks
 
-    # 2. 备用：暴力解析HTML (解决API为空的情况)
-    def fetch_html_fallback(target):
-        stocks = []
-        try:
-            url = f"https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code={target}&topline=10"
-            r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
-            match = re.search(r'content:"(.*?)",', r.text)
-            if match:
-                html_content = match.group(1).replace(r'\"', '"')
-                soup = BeautifulSoup(html_content, 'html.parser')
-                for row in soup.find_all('tr'):
-                    tds = row.find_all('td')
-                    if len(tds) >= 2:
-                        code_txt = tds[1].text.strip()
-                        name_txt = tds[2].text.strip()
-                        if re.match(r'^\d+$', code_txt):
-                            is_etf = code_txt.startswith(('159', '51', '56', '58'))
-                            prefix = "sh" if code_txt.startswith(('6','5')) else ("bj" if code_txt.startswith(('4','8')) else "sz")
-                            stocks.append({"c": f"{prefix}{code_txt}", "n": name_txt, "raw": code_txt, "is_etf": is_etf})
-        except: pass
-        return stocks[:10]
+    # --- 核心决策流程 ---
 
-    # --- 主流程 ---
-    
-    # A. 优先查自己
-    stock_list = fetch_api(fund_code)
+    # 步骤A: 获取当前基金的持仓
+    current_holdings = fetch_holdings(fund_code)
 
-    # B. 如果没查到，说明可能是C类，必须找到A类 (Parent Code)
-    if not stock_list:
+    # 步骤B: 【关键修复】如果是C类（持仓为空），必须找爸爸（A类）
+    if not current_holdings:
         parent_code = None
-        
-        # 策略1: 查 pingzhongdata (最快)
+        # 策略1: 查 js 映射
         try:
             r_map = requests.get(f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js", timeout=1.5)
             match = re.search(r'fS_code\s*=\s*["\'](\d+)["\']', r_map.text)
@@ -209,34 +208,36 @@ def get_fund_stocks(fund_code, recursion_depth=0):
                 if found != fund_code: parent_code = found
         except: pass
 
-        # 策略2: 【新】如果策略1失败，直接去爬页面上的相关链接 (专门解决 010052 这种)
+        # 策略2: 查页面链接 (专门针对010052/018897这种新基金)
         if not parent_code:
             try:
-                # 访问C类页面，寻找指向A类页面的链接 (jjcc_004666.html)
                 r_page = requests.get(f"http://fundf10.eastmoney.com/jjcc_{fund_code}.html", timeout=2)
-                # 找所有 jjcc_xxxxxx.html 的链接
                 links = re.findall(r'jjcc_(\d{6})\.html', r_page.text)
                 for lk in links:
                     if lk != fund_code:
                         parent_code = lk
                         break
             except: pass
-
-        # 如果找到了父亲，递归查询父亲
+        
+        # 找到爸爸后，递归调用自己
         if parent_code:
             return get_fund_stocks(parent_code, recursion_depth + 1)
-            
-        # 策略3: 如果都没找到，最后试一次 HTML 暴力解析自己
-        stock_list = fetch_html_fallback(fund_code)
 
-    # C. ETF 穿透 (解决联接基金)
-    if stock_list:
-        has_real_stock = any(not s['is_etf'] for s in stock_list)
-        if not has_real_stock:
-             first_etf = stock_list[0]['raw']
-             return get_fund_stocks(first_etf, recursion_depth + 1)
+    # 步骤C: 【核心修复】检查是否为“ETF联接基金”或“嵌套基金”
+    # 如果第一大持仓是ETF，或者前几大持仓里主要是ETF，说明这是个空壳，必须穿透下去！
+    if current_holdings:
+        # 检查第一重仓是否为ETF
+        top_holding = current_holdings[0]
+        if top_holding['is_etf']:
+            # 发现是套娃！直接递归查这个ETF的持仓，扔掉当前的壳子数据
+            return get_fund_stocks(top_holding['raw'], recursion_depth + 1)
 
-    # D. 查股价 (保持不变)
+    # 步骤D: 如果都不是，说明是最终的股票，去查价格
+    return get_stock_prices(current_holdings)
+
+# 辅助函数：批量查股价
+def get_stock_prices(stock_list):
+    # 只保留真正的股票，过滤掉残留的ETF或债券
     real_stocks = [x for x in stock_list if not x.get('is_etf', False)]
     if not real_stocks: return []
 
@@ -264,7 +265,6 @@ def get_fund_stocks(fund_code, recursion_depth=0):
 
 # ================= 4. 页面渲染 =================
 
-# 顶部手动刷新按钮
 c_title, c_btn = st.columns([0.75, 0.25])
 with c_title:
     st.markdown("##### 🌍 全球行情")
@@ -354,7 +354,8 @@ for item in final_list:
     """
     st.markdown(card, unsafe_allow_html=True)
     
-    with st.expander("📊 前十持仓 (实时穿透)"):
+    # 展开持仓逻辑
+    with st.expander("📊 前十持仓 (智能穿透)"):
         stocks = get_fund_stocks(item['c'])
         if stocks:
             for s in stocks:
@@ -362,7 +363,8 @@ for item in final_list:
                 row_html = f"""<div class="stock-row"><span style="flex:2; color:#333; font-weight:500;">{s['n']}</span><span style="flex:1; text-align:right; font-family:monospace;" class="{s_color}">{s['v']:.2f}</span><span style="flex:1; text-align:right; font-family:monospace;" class="{s_color}">{s['p']:+.2f}%</span></div>"""
                 st.markdown(row_html, unsafe_allow_html=True)
         else:
-            st.caption("暂无数据 (可能是新发基金或数据未披露)")
+            # 只有真的是空（QDII无数据或新发基金）才会显示这个
+            st.caption("暂无数据 (可能是新发基金、QDII或数据未披露)")
     
     st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True)
 
