@@ -12,7 +12,7 @@ from requests.packages.urllib3.util.retry import Retry
 
 # ================= 1. 基础配置 =================
 st.set_page_config(page_title="涨涨乐Pro", page_icon="📈", layout="centered")
-st_autorefresh(interval=30 * 1000, key="global_refresh") # 30秒刷新
+st_autorefresh(interval=30 * 1000, key="global_refresh")
 
 st.markdown("""
 <style>
@@ -31,12 +31,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 2. 数据库与网络设置 =================
-conn = sqlite3.connect('zzl_v49_stable.db', check_same_thread=False)
+# ================= 2. 网络设置 (防报错) =================
+conn = sqlite3.connect('zzl_v50_stable.db', check_same_thread=False)
 conn.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, portfolio TEXT)')
 current_user = 'admin'
 
-# 创建一个带重试机制的 Session，解决“加载失败”问题
 def create_session():
     session = requests.Session()
     retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
@@ -47,7 +46,7 @@ def create_session():
 
 global_session = create_session()
 
-# ================= 3. 核心逻辑 =================
+# ================= 3. 核心逻辑 (含"找大哥"修复) =================
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_indices():
@@ -68,13 +67,9 @@ def get_indices():
     return res
 
 def get_details_worker(p_item):
-    code = p_item['c']
-    money = p_item['m']
-    
+    code = p_item['c']; money = p_item['m']
     try:
-        # 获取估值 (增加超时保护)
         r_gs = global_session.get(f"http://fundgz.1234567.com.cn/js/{code}.js", timeout=5)
-        # 获取净值
         r_jz = global_session.get(f"http://fund.eastmoney.com/f10/F10DataApi.aspx?type=lsjz&code={code}&page=1&per=1", timeout=5)
         
         name = code; gz_val = 0.0; gz_time = ""
@@ -97,94 +92,102 @@ def get_details_worker(p_item):
         today_str = now.strftime("%Y-%m-%d")
         hm = now.strftime("%H:%M")
         
-        # 判定交易状态和主次显示
-        # 规则：交易中->估值亮；休市/收盘->净值亮
         close_time = "15:00"
         if any(k in name for k in ["港", "恒生", "纳斯达克", "QDII"]): close_time = "16:00"
 
         if is_weekend:
             used = jz_val; status = f"☕ 休市 ({jz_date})"
-            use_jz = True # 周末看净值
+            use_jz = True
         else:
-            if jz_date == today_str: # 晚上更新了净值
+            if jz_date == today_str:
                 used = jz_val; status = "✅ 今日已更新"
                 use_jz = True
-            else: # 白天交易中
-                used = gz_val
-                use_jz = False # 交易中看估值
+            else:
+                used = gz_val; use_jz = False
                 if hm < "09:30": status = f"⏳ 待开盘 ({gz_time})"
                 elif "11:30" < hm < "13:00": status = f"☕ 午间休市 ({gz_time})"
                 elif hm > close_time: status = f"🏁 已收盘 ({gz_time})"
                 else: status = f"⚡ 交易中 ({gz_time})"
         
         return {"c": code, "m": money, "name": name, "gz": gz_val, "jz": jz_val, "jz_date": jz_date, "used": used, "status": status, "use_jz": use_jz, "profit_money": money * (used/100)}
-    except Exception as e:
-        # 失败时的兜底数据，防止红框报错
+    except:
         return {"c": code, "m": money, "name": f"加载中..{code}", "gz": 0, "jz": 0, "jz_date": "-", "used": 0, "status": "🔄 同步中", "use_jz": True, "profit_money": 0}
 
-# 🔥🔥🔥【修复核心】持仓穿透逻辑 🔥🔥🔥
+# 🔥🔥🔥【V50 终极版】深度穿透逻辑 🔥🔥🔥
 @st.cache_data(ttl=300, show_spinner=False)
 def get_fund_stocks(fund_code, visited=None):
     if visited is None: visited = set()
     if fund_code in visited: return []
     visited.add(fund_code)
     
-    # 1. 尝试直接查股票 (API)
+    # 1. 查股票 (API)
     def fetch_api_stocks(code):
         stocks = []
         try:
-            # 这是一个查股票持仓的API
             url = f"https://fundmobapi.eastmoney.com/FundMNewApi/FundMNInverstPosition?FCODE={code}&deviceid=Wap&plat=Wap&product=EFund&version=6.4.4"
             r = global_session.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
             data = r.json()
             if data and 'Datas' in data:
                 for item in data['Datas'][:10]:
                     raw = item['GPDM']
-                    # 只有 159/51/56 开头的才是ETF，其他是股票
                     is_etf = raw.startswith(('159', '51', '56')) 
                     prefix = "sh" if raw.startswith(('6','5')) else ("bj" if raw.startswith(('4','8')) else "sz")
                     stocks.append({"c": f"{prefix}{raw}", "n": item['GPJC'], "raw": raw, "is_etf": is_etf})
         except: pass
         return stocks
 
-    # 2. 查“重仓基金” (针对联接基金/FOF)
-    def fetch_held_funds(code):
-        # 如果是联接基金，它不会有股票持仓，但会在"基金持仓"里显示它买了哪个ETF
+    # 2. 暴力查重仓基金 (HTML)
+    def fetch_held_etf_scan(code):
         try:
-            # 访问 "基金持仓" 页面 (jjcc)
-            url = f"http://fundf10.eastmoney.com/jjcc_{code}.html"
+            # 使用更纯净的数据接口
+            url = f"http://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code={code}&topline=20"
             r = global_session.get(url, timeout=3)
-            if r.status_code == 200:
-                # 在 HTML 里找链接，类似 href="http://fund.eastmoney.com/159732.html"
-                # 排除掉自己，找第一个出现的 6 位代码
-                codes = re.findall(r'href="http://fund\.eastmoney\.com/(\d{6})\.html"', r.text)
-                for c in codes:
-                    if c != code and c.startswith(('159', '51', '56')): # 只要ETF
-                        return c
+            # 暴力匹配所有 159/51 开头的 6 位代码
+            candidates = re.findall(r'>(159\d{3}|51\d{3}|56\d{3})<', r.text)
+            for c in candidates:
+                if c != code: return c # 找到第一个不等于自己的ETF代码
         except: pass
         return None
 
-    # === 执行流程 ===
+    # 3. 查兄弟份额 (找A类大哥) - 解决 C 类份额无数据问题
+    def fetch_brother_fund(code):
+        try:
+            url = f"http://fund.eastmoney.com/pingzhongdata/{code}.js"
+            r = global_session.get(url, timeout=3)
+            # 提取 fS_code = "xxxxxx"
+            match = re.search(r'fS_code\s*=\s*["\'](\d+)["\']', r.text)
+            if match:
+                brother = match.group(1)
+                if brother != code: return brother
+        except: pass
+        return None
+
+    # === 执行链 ===
     
-    # A. 先查有没有股票
+    # 步骤 A: 查自己有没有股票
     holdings = fetch_api_stocks(fund_code)
     
-    # B. 检查结果
+    # 如果有结果，检查是否包含 ETF
     if holdings:
-        # 如果直接查到了ETF (比如在API里就列出了ETF)，穿透它
         for h in holdings:
-            if h['is_etf']: return get_fund_stocks(h['raw'], visited)
-        # 如果是真股票，去查价格
+            if h['is_etf']: # 如果持仓里直接有ETF (API告诉我们的)
+                return get_fund_stocks(h['raw'], visited)
+        # 只有真股票
         real_stocks = [x for x in holdings if not x.get('is_etf', False)]
         if real_stocks: return get_stock_prices(real_stocks)
 
-    # C. 如果没股票，去查它持有哪个基金 (关键步骤！)
+    # 步骤 B: 查自己有没有持仓 ETF (网页暴力扫描)
     if not holdings:
-        # 针对 018897 这种情况，它持仓是空的，必须查 jjcc (重仓基金)
-        target_etf = fetch_held_funds(fund_code)
-        if target_etf:
-            # 找到了爹 (比如 159732)，递归查爹的股票
-            return get_fund_stocks(target_etf, visited)
+        etf_code = fetch_held_etf_scan(fund_code)
+        if etf_code:
+            return get_fund_stocks(etf_code, visited)
+
+    # 步骤 C: 【新增】如果是 C 类，去问问 A 类大哥 (兄弟份额)
+    if not holdings:
+        brother = fetch_brother_fund(fund_code)
+        if brother and brother not in visited:
+            # 递归去查兄弟
+            return get_fund_stocks(brother, visited)
 
     return []
 
@@ -233,13 +236,11 @@ if 'portfolio' not in st.session_state:
     row = conn.execute('SELECT portfolio FROM users WHERE username=?', (current_user,)).fetchone()
     st.session_state.portfolio = json.loads(row[0]) if row else []
 
-# 并发获取数据
 total_money = 0.0; total_profit = 0.0; final_list = []
 if st.session_state.portfolio:
     with ThreadPoolExecutor(max_workers=10) as executor:
         results = list(executor.map(get_details_worker, st.session_state.portfolio))
     for item in results:
-        # 只统计成功加载的数据
         if "加载中" not in item['name']:
             total_money += item['m']; total_profit += item['profit_money']
         final_list.append(item)
@@ -260,15 +261,10 @@ for item in final_list:
             conn.execute('UPDATE users SET portfolio=? WHERE username=?', (json.dumps(new_p), current_user))
             conn.commit(); st.rerun()
 
-    # 修复UI透明度逻辑 (图2的问题)
-    # 规则：如果不使用净值(交易中)，估值(左)为1.0，净值(右)为0.5
-    #      如果使用净值(收盘/周末)，估值(左)为0.5，净值(右)为1.0
     if item['use_jz']:
-        op_gz = "0.5"; wt_gz = "normal"
-        op_jz = "1.0"; wt_jz = "bold"
+        op_gz = "0.5"; wt_gz = "normal"; op_jz = "1.0"; wt_jz = "bold"
     else:
-        op_gz = "1.0"; wt_gz = "bold"
-        op_jz = "0.5"; wt_jz = "normal"
+        op_gz = "1.0"; wt_gz = "bold"; op_jz = "0.5"; wt_jz = "normal"
     
     color_jz = "#e74c3c" if item['jz'] >= 0 else "#2ecc71"
     color_gz = "#e74c3c" if item['gz'] >= 0 else "#2ecc71"
@@ -296,14 +292,14 @@ for item in final_list:
     st.markdown(card, unsafe_allow_html=True)
     
     with st.expander("📊 前十持仓 (智能穿透)"):
-        # 智能穿透：018897 -> 查不到股票 -> 查重仓基金 -> 找到159732 -> 查159732股票
+        # V50 穿透逻辑：查自己 -> 查ETF -> 查兄弟 -> 查兄弟的ETF -> 查股票
         stocks = get_fund_stocks(item['c'])
         if stocks:
             for s in stocks:
                 s_color = "t-red" if s['p'] >= 0 else "t-green"
                 st.markdown(f"""<div class="stock-row"><span style="flex:2; color:#333; font-weight:500;">{s['n']}</span><span style="flex:1; text-align:right; font-family:monospace;" class="{s_color}">{s['v']:.2f}</span><span style="flex:1; text-align:right; font-family:monospace;" class="{s_color}">{s['p']:+.2f}%</span></div>""", unsafe_allow_html=True)
         else:
-            st.caption("暂无数据 (已尝试穿透查询，仍无数据)")
+            st.caption("暂无数据 (已尝试：查本基金、查持仓ETF、查关联A类份额，均无公开持仓)")
     st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True)
 
 with st.sidebar:
@@ -313,7 +309,6 @@ with st.sidebar:
         money = st.number_input("本金", value=10000.0)
         if st.form_submit_button("确认"):
             try:
-                # 校验代码有效性
                 r = global_session.get(f"http://fundgz.1234567.com.cn/js/{code_input}.js", timeout=3)
                 if r.status_code == 200:
                     ls = [x for x in st.session_state.portfolio if x['c'] != code_input]
@@ -322,4 +317,4 @@ with st.sidebar:
                     conn.execute('UPDATE users SET portfolio=? WHERE username=?', (json.dumps(ls), current_user)); conn.commit()
                     st.success(f"已添加"); st.rerun()
                 else: st.error("代码错误")
-            except: st.error("网络错误，请重试")
+            except: st.error("网络错误")
